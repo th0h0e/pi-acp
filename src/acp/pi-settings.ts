@@ -1,3 +1,8 @@
+/**
+ * Reads pi's own settings so the adapter honors the same configuration the CLI does.
+ *
+ * Project settings (`<cwd>/.pi/settings.json`) are merged over user settings.
+ */
 import { existsSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'

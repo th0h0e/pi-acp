@@ -1,3 +1,10 @@
+/**
+ * Discovers pi's own session files (~/.pi/agent/sessions/**\/*.jsonl) so the client
+ * can list and resume conversations started in the `pi` CLI, not just in the editor.
+ *
+ * Transcripts can be large, so metadata is recovered by reading a bounded head and
+ * tail of each file rather than parsing it whole.
+ */
 import { readdirSync, readFileSync, statSync, openSync, readSync, closeSync, existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve, isAbsolute } from 'node:path'

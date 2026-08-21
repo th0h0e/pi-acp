@@ -1,3 +1,14 @@
+/**
+ * Bash tool translation.
+ *
+ * Two jobs: dig the command and output out of pi's loosely-shaped tool payloads
+ * (hence the many fallback field names below), and build the `_meta` blocks that
+ * make Zed render a bash tool call as a terminal.
+ *
+ * That pseudo-terminal is display-only — we push text into it. It is used when the
+ * client has no terminal capability; otherwise the editor owns a real one and
+ * these `*Meta` helpers are skipped. See src/acp/fs-bridge.ts.
+ */
 import type { ToolCallContent } from '@agentclientprotocol/sdk'
 
 type BashCommandRecord = {
@@ -76,6 +87,7 @@ export function bashExitCode(result: unknown, isError: boolean): number {
   return typeof exitCode === 'number' ? exitCode : isError ? 1 : 0
 }
 
+/** The newly appended part of a cumulative output, or the whole thing if it was rewritten. */
 export function bashOutputDelta(previous: string, next: string): string {
   return next.startsWith(previous) ? next.slice(previous.length) : next
 }

@@ -1,3 +1,17 @@
+/**
+ * A single ACP conversation, backed by one pi subprocess.
+ *
+ * The core job is `handlePiEvent`: pi emits a stream of events (text deltas, tool
+ * execution, agent lifecycle) and each is translated into an ACP `session/update`
+ * notification. Everything else here exists to make that translation correct:
+ *
+ *  - turn lifecycle: an ACP prompt resolves on `agent_settled`, not `turn_end`,
+ *    because pi retries and compacts within a single user turn
+ *  - ordering: updates are chained through `lastEmit` so a prompt never resolves
+ *    before its own notifications have been delivered
+ *  - diffs: file contents are snapshotted before edit/write so completion can
+ *    carry a structured before/after
+ */
 import type {
   AgentSideConnection,
   ContentBlock,
@@ -61,6 +75,12 @@ const CONFIRM_PERMISSION_OPTIONS: PermissionOption[] = [
 const EXTENSION_UI_RAW_INPUT_KEYS = ['title', 'message', 'options', 'placeholder', 'prefill'] as const
 const CHOICE_OPTION_PREFIX = 'choice-'
 
+/**
+ * 1-based line of `needle` in `text`, but only if it occurs exactly once.
+ *
+ * Used to point an edit's tool location at the line being changed. Ambiguous
+ * matches return undefined rather than guessing at the wrong line.
+ */
 function findUniqueLineNumber(text: string, needle: string): number | undefined {
   if (!needle) return undefined
 
@@ -141,6 +161,8 @@ function getEditOldTexts(args: unknown): string[] {
   return oldTexts
 }
 
+// ACP locations must be absolute for clients to open them; pi reports paths
+// relative to the session cwd.
 function toToolCallLocations(args: unknown, cwd: string, line?: number): ToolCallLocation[] | undefined {
   const path = getToolPath(args)
   if (!path) return undefined
@@ -149,6 +171,7 @@ function toToolCallLocations(args: unknown, cwd: string, line?: number): ToolCal
   return [{ path: resolvedPath, ...(typeof line === 'number' ? { line } : {}) }]
 }
 
+/** Registry of live sessions; owns spawning and tearing down their pi subprocesses. */
 export class SessionManager {
   private sessions = new Map<string, PiAcpSession>()
   private readonly store = new SessionStore()
@@ -381,6 +404,12 @@ export class PiAcpSession {
     })
   }
 
+  /**
+   * Run one user turn, or queue it if a turn is already in flight.
+   *
+   * The returned promise resolves from `handlePiEvent` (on `agent_settled`), not
+   * from the pi RPC call, which only acknowledges that the prompt was accepted.
+   */
   async prompt(message: string, images: unknown[] = []): Promise<StopReason> {
     // pi RPC mode disables slash command expansion, so we do it here.
     const expandedMessage = expandSlashCommand(message, this.fileCommands)
@@ -480,6 +509,13 @@ export class PiAcpSession {
     await this.lastEmit
   }
 
+  /**
+   * Announce or update a bash tool call, titled with the command itself.
+   *
+   * Which terminal the client sees depends on delegation: either the editor's real
+   * one (attached later by `attachClientTerminal`) or the `_meta` pseudo-terminal
+   * we drive ourselves from pi's captured output.
+   */
   private emitBashToolCall(params: {
     sessionUpdate: 'tool_call' | 'tool_call_update'
     toolCallId: string
@@ -530,6 +566,12 @@ export class PiAcpSession {
     })
   }
 
+  /**
+   * Feed bash output to the pseudo-terminal as it arrives.
+   *
+   * pi resends the whole output each time, so only the newly appended slice is
+   * forwarded; a terminal appends what it is given.
+   */
   private emitBashOutputUpdate(params: {
     toolCallId: string
     status: 'in_progress' | 'completed' | 'failed'
@@ -617,6 +659,14 @@ export class PiAcpSession {
     })
   }
 
+  /**
+   * Translate one pi event into ACP session updates. This is the heart of the adapter.
+   *
+   * Tool calls surface twice over their lifetime: first from `message_update` while
+   * the model is still streaming the arguments (so the client can show a spinner
+   * early), then again from the `tool_execution_*` events once pi actually runs it.
+   * Hence the care around not downgrading an already-`in_progress` status.
+   */
   private handlePiEvent(ev: PiRpcEvent) {
     const type = String((ev as any).type ?? '')
 
@@ -822,6 +872,8 @@ export class PiAcpSession {
         break
       }
 
+      // The tool finished: emit its final status, plus a structured diff if we
+      // snapshotted the file beforehand.
       case 'tool_execution_end': {
         const toolCallId = String((ev as any).toolCallId ?? '')
         if (!toolCallId) break
@@ -1000,6 +1052,11 @@ export class PiAcpSession {
     }
   }
 
+  /**
+   * pi extensions can ask the user things (select, confirm, input). ACP has no
+   * general prompt, so the answerable ones are mapped onto permission requests and
+   * the rest are cancelled — pi blocks until it gets a response either way.
+   */
   private async handleExtensionUiRequest(ev: PiRpcEvent): Promise<void> {
     const id = stringProp(ev, 'id')
     const method = stringProp(ev, 'method')

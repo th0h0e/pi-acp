@@ -1,3 +1,7 @@
+/**
+ * Locating the `pi` executable. Windows needs care: npm installs it as a .cmd
+ * launcher script, which can only be spawned through a shell.
+ */
 import { platform } from 'node:os'
 
 export function defaultPiCommand(): string {

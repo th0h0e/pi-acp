@@ -1,3 +1,13 @@
+/**
+ * Wrapper around one `pi --mode rpc` subprocess.
+ *
+ * Two kinds of traffic share pi's stdout, both newline-delimited JSON:
+ *  - responses to commands we sent, correlated by `id` (see `request`)
+ *  - unsolicited events (streaming text, tool execution, agent lifecycle),
+ *    fanned out to `onEvent` listeners — PiAcpSession is the main consumer.
+ *
+ * Everything else in this file is spawn ergonomics and error mapping.
+ */
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import * as readline from 'node:readline'
 import { getPiCommand, shouldUseShellForPiCommand } from './command.js'
@@ -82,6 +92,7 @@ type SpawnParams = {
 
 export class PiRpcProcess {
   private readonly child: ChildProcessWithoutNullStreams
+  /** In-flight commands awaiting a `response` with a matching id. */
   private readonly pending = new Map<string, { resolve: (v: PiRpcResponse) => void; reject: (e: unknown) => void }>()
   private eventHandlers: Array<(ev: PiRpcEvent) => void> = []
   private readonly preludeLines: string[] = []
@@ -210,6 +221,7 @@ export class PiRpcProcess {
     return proc
   }
 
+  /** Subscribe to pi's unsolicited events. Returns an unsubscribe function. */
   onEvent(handler: (ev: PiRpcEvent) => void): () => void {
     this.eventHandlers.push(handler)
     return () => {
@@ -328,6 +340,7 @@ export class PiRpcProcess {
     await this.writeLine(`${JSON.stringify({ type: 'extension_ui_response', ...response })}\n`)
   }
 
+  /** Send a command and resolve when pi echoes back a response with the same id. */
   private request(cmd: PiRpcCommand): Promise<PiRpcResponse> {
     const id = crypto.randomUUID()
     const withId = { ...cmd, id }

@@ -1,3 +1,7 @@
+/**
+ * Converts pi's `get_commands` reply into the ACP slash commands the client shows
+ * in its picker. pi normally expands these itself, but RPC mode does not.
+ */
 import type { AvailableCommand } from '@agentclientprotocol/sdk'
 
 export type PiRpcCommandInfo = {

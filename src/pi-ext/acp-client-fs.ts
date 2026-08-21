@@ -30,6 +30,10 @@ import { createInterface } from 'node:readline'
 type BridgeResponse = { content?: string; exitCode?: number | null }
 type Pending = { resolve: (value: BridgeResponse) => void; reject: (err: Error) => void }
 
+/**
+ * Client half of the bridge protocol: one socket, many concurrent requests
+ * correlated by id. See src/acp/fs-bridge.ts for the server.
+ */
 class BridgeClient {
   private socket: Socket | null = null
   private connecting: Promise<Socket> | null = null
@@ -134,6 +138,9 @@ class BridgeClient {
   }
 }
 
+// pi calls this on load. Which tools get overridden is decided entirely by the
+// env vars the adapter set when spawning pi (see FsBridgeServer.spawnExtras),
+// so a capability the client lacks simply leaves pi's built-in in place.
 export default function (pi: ExtensionAPI) {
   const socketPath = process.env.PI_ACP_FS_SOCKET
   if (!socketPath) return

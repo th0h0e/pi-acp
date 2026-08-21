@@ -6,6 +6,12 @@ export type PiImage = {
   data: string
 }
 
+/**
+ * Flatten an ACP prompt into what pi accepts: one text message plus images.
+ *
+ * pi has no notion of the richer ACP block types, so the rest are inlined as
+ * labelled text rather than dropped — losing the context silently is worse.
+ */
 export function promptToPiMessage(blocks: ContentBlock[]): {
   message: string
   images: PiImage[]

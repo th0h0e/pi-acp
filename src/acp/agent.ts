@@ -1,3 +1,11 @@
+/**
+ * The ACP `Agent` implementation: one instance per client connection.
+ *
+ * This is the protocol surface (initialize, session/new, session/prompt, ...).
+ * It owns connection-wide concerns — client capabilities, session lookup and
+ * restore, model/mode config, slash commands — and delegates the actual
+ * conversation to PiAcpSession, which does the pi-event -> session/update work.
+ */
 import {
   RequestError,
   type Agent as ACPAgent,
@@ -184,6 +192,14 @@ export class PiAcpAgent implements ACPAgent {
     }
   }
 
+  /**
+   * Return the live session for `sessionId`, respawning pi from the stored session
+   * file if it isn't running. Every request handler goes through this, so a client
+   * can prompt a session that was only ever seen in a previous connection.
+   *
+   * Concurrent callers share one in-flight restore (`restoringSessions`) so we
+   * never spawn two pi processes for the same session.
+   */
   private async restoreSession(
     sessionId: string,
     opts?: { cwd?: string; mcpServers?: LoadSessionRequest['mcpServers'] }
@@ -253,6 +269,11 @@ export class PiAcpAgent implements ACPAgent {
     }
   }
 
+  /**
+   * ACP handshake. Runs once per connection, before any session exists, and is
+   * where we learn what the client can do — the delegation capabilities captured
+   * here decide whether pi's file and shell tools get routed back to the editor.
+   */
   async initialize(params: InitializeRequest): Promise<InitializeResponse> {
     // We currently only support ACP protocol version 1.
     const supportedVersion = 1
@@ -294,6 +315,13 @@ export class PiAcpAgent implements ACPAgent {
     }
   }
 
+  /**
+   * Spawn a pi subprocess for a new conversation and report what the client needs
+   * to render its UI: available models, thinking levels, and the startup prelude.
+   *
+   * A failure to list models is treated as "not authenticated" rather than a
+   * generic error, so clients can offer the login flow instead of a dead session.
+   */
   async newSession(params: NewSessionRequest) {
     if (!isAbsolute(params.cwd)) {
       throw RequestError.invalidParams(`cwd must be an absolute path: ${params.cwd}`)
@@ -461,6 +489,13 @@ export class PiAcpAgent implements ACPAgent {
     return
   }
 
+  /**
+   * Handle one user turn.
+   *
+   * Built-in slash commands (`/compact`, `/export`, ...) are answered here without
+   * involving the model; anything else is handed to the session, which resolves
+   * once pi reports the turn settled.
+   */
   async prompt(params: PromptRequest): Promise<PromptResponse> {
     const session = await this.restoreSession(params.sessionId)
 
@@ -953,6 +988,13 @@ export class PiAcpAgent implements ACPAgent {
     return { sessions, nextCursor, _meta: {} }
   }
 
+  /**
+   * Reopen a past session and replay its transcript.
+   *
+   * pi's stored messages are re-emitted as session/update notifications so the
+   * client can rebuild the thread; the tool calls synthesized here are historical
+   * records, already `completed`, not live executions.
+   */
   async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
     if (!isAbsolute(params.cwd)) {
       throw RequestError.invalidParams(`cwd must be an absolute path: ${params.cwd}`)

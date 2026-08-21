@@ -1,5 +1,14 @@
+/**
+ * Tool translation helpers shared by the live session and history replay.
+ */
 import type { ToolKind } from '@agentclientprotocol/sdk'
 
+/**
+ * Best-effort human-readable text for a pi tool result.
+ *
+ * pi has no single result shape, so this tries the known ones in order of
+ * usefulness and falls back to pretty-printed JSON.
+ */
 export function toolResultToText(result: unknown): string {
   if (!result) return ''
 

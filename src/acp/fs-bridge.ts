@@ -60,13 +60,17 @@ export function resolveFsExtensionPath(): string | null {
 
 /**
  * Local socket server that lets the pi extension (src/pi-ext/acp-client-fs.ts,
- * loaded into the pi subprocess via `pi -e`) delegate file reads and writes back
- * to the adapter, which routes them through the ACP client. This mirrors goose's
- * fs delegation: the editor owns agent writes, so they appear in its buffers.
+ * loaded into the pi subprocess via `pi -e`) delegate work back to the adapter,
+ * which routes it through the ACP client. This mirrors goose's fs delegation: the
+ * editor owns agent writes, so they appear in its buffers, and it owns the terminal
+ * bash runs in.
  *
- * Protocol: newline-delimited JSON. Request {id, op: "read"|"write", path,
- * content?}; response {id, ok, content?(base64), error?}. Read responses are
- * base64 so binary disk fallbacks survive the trip.
+ * It exists because pi does its own I/O inside its subprocess, out of the adapter's
+ * reach — the extension is the only way in, and this socket is how it calls home.
+ *
+ * Protocol: newline-delimited JSON. Request {id, op: "read"|"write"|"terminal_run"|
+ * "terminal_kill", ...}; response {id, ok, content?(base64), exitCode?, error?}.
+ * Content is base64 so binary disk fallbacks survive the trip.
  */
 export class FsBridgeServer {
   private sessionId: string | null = null
@@ -83,6 +87,7 @@ export class FsBridgeServer {
     private readonly extensionPath: string
   ) {}
 
+  /** Returns null when delegation is off or unavailable; callers then run stock pi. */
   static async maybeStart(opts: {
     conn: AgentSideConnection
     cwd: string
@@ -123,6 +128,7 @@ export class FsBridgeServer {
     this.sessionId = sessionId
   }
 
+  /** Spawn arguments for pi: which extension to load, and what it may delegate. */
   spawnExtras(): { extensionPath: string; extraEnv: Record<string, string> } {
     return {
       extensionPath: this.extensionPath,
@@ -166,6 +172,7 @@ export class FsBridgeServer {
     })
   }
 
+  /** Handle one request from the extension and write back exactly one response. */
   private async handleLine(socket: Socket, line: string): Promise<void> {
     let req: BridgeRequest
     try {

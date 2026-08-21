@@ -1,3 +1,9 @@
+/**
+ * File-based slash commands (prompt templates).
+ *
+ * pi's RPC mode does not expand these, so the adapter loads the same directories
+ * pi would and substitutes the template itself before sending the prompt.
+ */
 import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'

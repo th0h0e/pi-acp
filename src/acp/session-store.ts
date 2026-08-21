@@ -1,3 +1,9 @@
+/**
+ * Maps ACP sessionIds to the pi session file that backs them, so `session/load`
+ * can respawn pi against the right transcript in a later process.
+ *
+ * Small enough that the whole map is rewritten on every change.
+ */
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { getPiAcpSessionMapPath } from './paths.js'

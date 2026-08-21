@@ -1,3 +1,7 @@
+/**
+ * Flatten stored pi messages back to plain text for history replay (session/load).
+ */
+
 export function normalizePiMessageText(content: unknown): string {
   if (typeof content === 'string') return content
   if (!Array.isArray(content)) return ''

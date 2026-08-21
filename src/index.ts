@@ -1,3 +1,10 @@
+/**
+ * Process entrypoint.
+ *
+ * Wires the ACP client (which speaks JSON-RPC over our stdio) to PiAcpAgent,
+ * which in turn spawns and drives `pi --mode rpc` subprocesses. This file only
+ * does plumbing: stream setup, shutdown, and the `--terminal-login` side door.
+ */
 import { AgentSideConnection, ndJsonStream } from '@agentclientprotocol/sdk'
 import { PiAcpAgent } from './acp/agent.js'
 import { getPiCommand, shouldUseShellForPiCommand } from './pi-rpc/command.js'
@@ -21,6 +28,8 @@ if (process.argv.includes('--terminal-login')) {
   process.exit(typeof res.status === 'number' ? res.status : 1)
 }
 
+// Named from ndJsonStream's point of view: `input` is what it writes into (our
+// stdout, i.e. messages to the client), `output` is what it reads (our stdin).
 const input = new WritableStream<Uint8Array>({
   write(chunk) {
     return new Promise<void>(resolve => {
