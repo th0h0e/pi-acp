@@ -329,6 +329,14 @@ export class PiAcpSession {
   // completes only when `agent_settled` is emitted.
   private inAgentLoop = false
 
+  // ACP groups chunks into messages by `messageId`, and a change in the id is what tells the
+  // client a new message began. pi marks the boundaries (`message_start` / `message_end`) but
+  // mints no id of its own, so we number them here. Text and thinking are separate ACP message
+  // types, hence separate ids for the same pi message.
+  private messageSeq = 0
+  private currentMessageId: string | null = null
+  private currentThoughtId: string | null = null
+
   // For ACP diff support: capture file contents before edit/write mutations,
   // then emit ToolCallContent {type:"diff"}. Snapshots are promises because
   // they may be served by the ACP client (fs/read_text_file), which reflects
@@ -474,13 +482,51 @@ export class PiAcpSession {
     return this.cancelRequested
   }
 
+  /** Start a new assistant message, so the next chunks are grouped under fresh ids. */
+  private beginMessage(): void {
+    const n = ++this.messageSeq
+    this.currentMessageId = `msg_${this.sessionId}_${n}`
+    this.currentThoughtId = `thk_${this.sessionId}_${n}`
+  }
+
+  private messageId(): string {
+    if (!this.currentMessageId) this.beginMessage()
+    return this.currentMessageId ?? ''
+  }
+
+  private thoughtId(): string {
+    if (!this.currentThoughtId) this.beginMessage()
+    return this.currentThoughtId ?? ''
+  }
+
+  /**
+   * Stamp a `messageId` on content chunks that lack one.
+   *
+   * The streaming paths pass their own id so a reply's deltas stay one message. Everything
+   * else here is a standalone one-chunk notice (startup info, retry notices, queue status);
+   * giving each a fresh id keeps clients from appending it to the model's reply.
+   */
+  private withMessageId(update: SessionUpdate): SessionUpdate {
+    const kind = update.sessionUpdate
+    if (kind !== 'agent_message_chunk' && kind !== 'agent_thought_chunk' && kind !== 'user_message_chunk') {
+      return update
+    }
+    if (update.messageId) return update
+
+    this.currentMessageId = null
+    this.currentThoughtId = null
+    return { ...update, messageId: `msg_${this.sessionId}_${++this.messageSeq}` }
+  }
+
   private emit(update: SessionUpdate): void {
+    const stamped = this.withMessageId(update)
+
     // Serialize update delivery.
     this.lastEmit = this.lastEmit
       .then(() =>
         this.conn.sessionUpdate({
           sessionId: this.sessionId,
-          update
+          update: stamped
         })
       )
       .catch(() => {
@@ -497,7 +543,7 @@ export class PiAcpSession {
       .then(async () => {
         const update = await build()
         if (update) {
-          await this.conn.sessionUpdate({ sessionId: this.sessionId, update })
+          await this.conn.sessionUpdate({ sessionId: this.sessionId, update: this.withMessageId(update) })
         }
       })
       .catch(() => {
@@ -678,6 +724,7 @@ export class PiAcpSession {
         if (ame?.type === 'text_delta' && typeof ame.delta === 'string') {
           this.emit({
             sessionUpdate: 'agent_message_chunk',
+            messageId: this.messageId(),
             content: { type: 'text', text: ame.delta } satisfies ContentBlock
           })
           break
@@ -686,6 +733,7 @@ export class PiAcpSession {
         if (ame?.type === 'thinking_delta' && typeof ame.delta === 'string') {
           this.emit({
             sessionUpdate: 'agent_thought_chunk',
+            messageId: this.thoughtId(),
             content: { type: 'text', text: ame.delta } satisfies ContentBlock
           })
           break
@@ -761,6 +809,19 @@ export class PiAcpSession {
         }
 
         // Ignore other delta/event types for now.
+        break
+      }
+
+      // pi brackets every message it appends to the transcript, including the user's own.
+      // Only assistant messages are streamed to ACP as chunks, so only those open an id.
+      case 'message_start': {
+        if (String((ev as any).message?.role ?? '') === 'assistant') this.beginMessage()
+        break
+      }
+
+      case 'message_end': {
+        this.currentMessageId = null
+        this.currentThoughtId = null
         break
       }
 

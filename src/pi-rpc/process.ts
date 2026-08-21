@@ -109,6 +109,9 @@ export class PiRpcProcess {
    */
   private thinkingLevel: ThinkingLevel | null = null
 
+  /** Cached `get_available_models` round trip; see the accessor for why this is safe. */
+  private availableModels: Promise<unknown> | null = null
+
   private constructor(child: ChildProcessWithoutNullStreams) {
     this.child = child
 
@@ -275,10 +278,26 @@ export class PiRpcProcess {
     return res.data
   }
 
+  /**
+   * pi's model catalog is fixed for the lifetime of the process — `set_model` changes the
+   * selection, not the list — but the response is ~130 KB, and we rebuild the advertised
+   * config options on every model or thinking-level change. Cache the in-flight promise so
+   * concurrent callers share one round trip; drop it on failure so an error is not permanent.
+   *
+   * The *current* model always comes from `get_state`, never from here.
+   */
   async getAvailableModels(): Promise<unknown> {
-    const res = await this.request({ type: 'get_available_models' })
-    if (!res.success) throw new Error(`pi get_available_models failed: ${res.error ?? JSON.stringify(res.data)}`)
-    return res.data
+    this.availableModels ??= this.request({ type: 'get_available_models' })
+      .then(res => {
+        if (!res.success) throw new Error(`pi get_available_models failed: ${res.error ?? JSON.stringify(res.data)}`)
+        return res.data
+      })
+      .catch(err => {
+        this.availableModels = null
+        throw err
+      })
+
+    return this.availableModels
   }
 
   async setModel(provider: string, modelId: string): Promise<unknown> {
