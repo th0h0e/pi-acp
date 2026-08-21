@@ -23,6 +23,10 @@ Expect some minor breaking changes.
   - The editor performs the write, so agent edits appear in your open buffer as reviewable, undoable changes rather than only as a diff in the chat panel
   - Reads are served from the editor buffer, so the agent sees unsaved changes instead of a stale file
   - Falls back to direct disk access for clients without the capability, or whenever a client request fails; set `PI_ACP_DISABLE_CLIENT_FS=1` to disable it entirely
+- Client terminal delegation (`terminal/*`)
+  - When the client advertises the `terminal` capability, pi's `bash` tool is run through the client instead of inside the pi subprocess
+  - The editor spawns the command in a real terminal, so output renders with full PTY fidelity and the client's stop control kills the running command
+  - Falls back to pi's own local shell when the client has no terminal capability or refuses a command, so `bash` always works
 - Session persistence
   - pi stores its own sessions in `~/.pi/agent/sessions/...`
   - `pi-acp` stores a small mapping file at `~/.pi/pi-acp/session-map.json` so `session/load` can reattach to a previous pi session file
@@ -200,7 +204,6 @@ Project layout:
 
 ## Limitations
 
-- No ACP terminal delegation (`terminal/*`); pi executes shell commands locally.
 - MCP servers are accepted in ACP params and stored in session state, but not wired through to pi in this adapter. If you use [pi MCP adapter](https://github.com/nicobailon/pi-mcp-adapter) it will be available in the ACP client.
 - Assistant streaming is currently sent as `agent_message_chunk` (no separate thought stream).
 - Queue is implemented client-side and should work like pi's `one-at-a-time`

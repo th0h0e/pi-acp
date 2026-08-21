@@ -24,6 +24,49 @@ export class FakeAgentSideConnection {
     this.writeTextFileRequests.push(params)
     if (this.failClientWrites) throw new Error('client refused write')
   }
+  readonly createTerminalRequests: Array<{ sessionId: string; command: string; args?: string[]; cwd?: string }> = []
+  readonly killedTerminals: string[] = []
+  readonly releasedTerminals: string[] = []
+
+  // When set, createTerminal rejects, standing in for a client without the
+  // terminal capability (or one that refuses a specific command).
+  failCreateTerminal = false
+  terminalOutput = ''
+  terminalExitCode: number | null = 0
+  // When true, the command runs until killed, so cancellation can be exercised.
+  holdTerminals = false
+  private terminalCounter = 0
+
+  async createTerminal(params: { sessionId: string; command: string; args?: string[]; cwd?: string }) {
+    this.createTerminalRequests.push(params)
+    if (this.failCreateTerminal) throw new Error('client refused terminal')
+
+    const id = `term_${this.terminalCounter++}`
+    let finish: () => void = () => {}
+    const exited = this.holdTerminals ? new Promise<void>(resolve => (finish = resolve)) : Promise.resolve()
+
+    return {
+      id,
+      waitForExit: async () => {
+        await exited
+        return { exitCode: this.terminalExitCode, signal: null }
+      },
+      currentOutput: async () => ({
+        output: this.terminalOutput,
+        exitStatus: { exitCode: this.terminalExitCode, signal: null }
+      }),
+      kill: async () => {
+        this.killedTerminals.push(id)
+        finish()
+        return {}
+      },
+      release: async () => {
+        this.releasedTerminals.push(id)
+        return {}
+      }
+    }
+  }
+
   nextPermissionResponse: { outcome: { outcome: 'selected'; optionId: string } | { outcome: 'cancelled' } } = {
     outcome: { outcome: 'selected', optionId: 'allow' }
   }

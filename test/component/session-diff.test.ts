@@ -224,7 +224,7 @@ function createClientFsSession(cwd: string) {
     proc: proc as any,
     conn: asAgentConn(conn),
     fileCommands: [],
-    clientFsCapabilities: { readTextFile: true, writeTextFile: true }
+    delegationCapabilities: { readTextFile: true, writeTextFile: true, terminal: false }
   })
 
   return { conn, proc }

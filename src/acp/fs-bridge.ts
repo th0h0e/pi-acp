@@ -5,13 +5,30 @@ import { tmpdir } from 'node:os'
 import { isAbsolute, join, resolve as resolvePath } from 'node:path'
 import { createInterface } from 'node:readline'
 import { fileURLToPath } from 'node:url'
-import type { ClientFsCapabilities } from './client-fs.js'
+import type { ClientDelegationCapabilities } from './client-fs.js'
 
 type BridgeRequest = {
   id?: unknown
   op?: unknown
   path?: unknown
   content?: unknown
+  command?: unknown
+  cwd?: unknown
+  env?: unknown
+  timeout?: unknown
+  runId?: unknown
+}
+
+/** Notified when a client-side terminal is created, so the session can attach it to a tool call. */
+export type TerminalListener = (info: { terminalId: string; command: string }) => void
+
+function toEnvVariables(env: unknown): Array<{ name: string; value: string }> | undefined {
+  if (!env || typeof env !== 'object') return undefined
+  const out: Array<{ name: string; value: string }> = []
+  for (const [name, value] of Object.entries(env as Record<string, unknown>)) {
+    if (typeof value === 'string') out.push({ name, value })
+  }
+  return out.length ? out : undefined
 }
 
 let bridgeCounter = 0
@@ -53,23 +70,26 @@ export function resolveFsExtensionPath(): string | null {
  */
 export class FsBridgeServer {
   private sessionId: string | null = null
+  private terminalListener: TerminalListener | null = null
+  /** Live client terminals keyed by the originating `terminal_run` request id. */
+  private terminals = new Map<string, { kill: () => Promise<unknown> }>()
 
   private constructor(
     private readonly server: Server,
     readonly socketPath: string,
     private readonly conn: AgentSideConnection,
     private readonly cwd: string,
-    private readonly capabilities: ClientFsCapabilities,
+    private readonly capabilities: ClientDelegationCapabilities,
     private readonly extensionPath: string
   ) {}
 
   static async maybeStart(opts: {
     conn: AgentSideConnection
     cwd: string
-    capabilities?: ClientFsCapabilities
+    capabilities?: ClientDelegationCapabilities
   }): Promise<FsBridgeServer | null> {
     const caps = opts.capabilities
-    if (!caps || (!caps.readTextFile && !caps.writeTextFile)) return null
+    if (!caps || (!caps.readTextFile && !caps.writeTextFile && !caps.terminal)) return null
     if (process.env.PI_ACP_DISABLE_CLIENT_FS === '1') return null
 
     const extensionPath = resolveFsExtensionPath()
@@ -109,9 +129,15 @@ export class FsBridgeServer {
       extraEnv: {
         PI_ACP_FS_SOCKET: this.socketPath,
         PI_ACP_FS_READ: this.capabilities.readTextFile ? '1' : '0',
-        PI_ACP_FS_WRITE: this.capabilities.writeTextFile ? '1' : '0'
+        PI_ACP_FS_WRITE: this.capabilities.writeTextFile ? '1' : '0',
+        PI_ACP_TERMINAL: this.capabilities.terminal ? '1' : '0'
       }
     }
+  }
+
+  /** Register the session callback fired when a client terminal is created. */
+  setTerminalListener(listener: TerminalListener): void {
+    this.terminalListener = listener
   }
 
   close(): void {
@@ -151,7 +177,7 @@ export class FsBridgeServer {
     const id = typeof req.id === 'string' ? req.id : null
     if (!id) return
 
-    const respond = (payload: { ok: boolean; content?: string; error?: string }) => {
+    const respond = (payload: { ok: boolean; content?: string; error?: string; exitCode?: number | null }) => {
       try {
         socket.write(`${JSON.stringify({ id, ...payload })}\n`)
       } catch {
@@ -159,14 +185,27 @@ export class FsBridgeServer {
       }
     }
 
-    const path = typeof req.path === 'string' ? req.path : null
-    if (!path) {
-      respond({ ok: false, error: 'missing path' })
-      return
-    }
-    const abs = isAbsolute(path) ? path : resolvePath(this.cwd, path)
-
     try {
+      if (req.op === 'terminal_run') {
+        const result = await this.runTerminal(id, req)
+        respond({ ok: true, content: result.output, exitCode: result.exitCode })
+        return
+      }
+
+      if (req.op === 'terminal_kill') {
+        const runId = typeof req.runId === 'string' ? req.runId : null
+        await this.terminals.get(runId ?? '')?.kill()
+        respond({ ok: true })
+        return
+      }
+
+      const path = typeof req.path === 'string' ? req.path : null
+      if (!path) {
+        respond({ ok: false, error: 'missing path' })
+        return
+      }
+      const abs = isAbsolute(path) ? path : resolvePath(this.cwd, path)
+
       if (req.op === 'read') {
         const buffer = await this.readFile(abs)
         respond({ ok: true, content: buffer.toString('base64') })
@@ -178,6 +217,65 @@ export class FsBridgeServer {
       }
     } catch (e) {
       respond({ ok: false, error: String((e as Error)?.message ?? e) })
+    }
+  }
+
+  /**
+   * Run a command in a client-owned terminal and wait for it to exit.
+   *
+   * The client spawns the process, so the user gets a real terminal in the editor
+   * (proper PTY rendering, and a stop control wired to `terminal/kill`). Output is
+   * collected once on exit purely so pi's tool result still carries it for the model;
+   * the live view is the client's own.
+   *
+   * Throws if the client has no terminal capability or refuses, which the pi
+   * extension treats as a signal to fall back to pi's local shell.
+   */
+  private async runTerminal(runId: string, req: BridgeRequest): Promise<{ output: string; exitCode: number | null }> {
+    if (!this.capabilities.terminal || !this.sessionId) {
+      throw new Error('client terminal capability unavailable')
+    }
+
+    const command = typeof req.command === 'string' ? req.command : ''
+    if (!command.trim()) throw new Error('missing command')
+
+    const cwd = typeof req.cwd === 'string' && req.cwd ? req.cwd : this.cwd
+    const timeout = typeof req.timeout === 'number' && req.timeout > 0 ? req.timeout : undefined
+
+    // pi hands us a full shell command line, so run it through a shell rather
+    // than trying to split it into argv ourselves.
+    const handle = await this.conn.createTerminal({
+      sessionId: this.sessionId,
+      command: 'bash',
+      args: ['-c', command],
+      cwd,
+      env: toEnvVariables(req.env)
+    })
+
+    this.terminals.set(runId, { kill: () => handle.kill() })
+
+    let timer: NodeJS.Timeout | undefined
+    if (timeout) {
+      timer = setTimeout(() => void handle.kill().catch(() => {}), timeout)
+      timer.unref?.()
+    }
+
+    try {
+      this.terminalListener?.({ terminalId: handle.id, command })
+      await handle.waitForExit()
+      const out = await handle.currentOutput()
+      return {
+        output: Buffer.from(out.output ?? '', 'utf8').toString('base64'),
+        exitCode: out.exitStatus?.exitCode ?? null
+      }
+    } finally {
+      if (timer) clearTimeout(timer)
+      this.terminals.delete(runId)
+      try {
+        await handle.release()
+      } catch {
+        // ignore; the client may already have torn the terminal down
+      }
     }
   }
 

@@ -28,11 +28,11 @@ function fakeExtensionApi() {
   }
 }
 
-async function setup(cwd: string, conn: FakeAgentSideConnection) {
+async function setup(cwd: string, conn: FakeAgentSideConnection, terminal = false) {
   const bridge = await FsBridgeServer.maybeStart({
     conn: asAgentConn(conn),
     cwd,
-    capabilities: { readTextFile: true, writeTextFile: true }
+    capabilities: { readTextFile: true, writeTextFile: true, terminal }
   })
   assert.ok(bridge, 'expected bridge to start')
   bridge.setSessionId('s1')
@@ -60,6 +60,18 @@ async function setup(cwd: string, conn: FakeAgentSideConnection) {
 
 function runTool(tool: AnyToolDefinition, params: unknown) {
   return tool.execute('call-1', params as never, undefined, undefined, { cwd: process.cwd() } as never)
+}
+
+// pi's bash tool reads session metadata off the context to expose PI_* env vars,
+// which real pi always supplies; the fs tools do not need it.
+function runBashTool(tool: AnyToolDefinition, params: unknown) {
+  const ctx = {
+    cwd: process.cwd(),
+    sessionManager: { getSessionId: () => 'test-session', getSessionFile: () => null },
+    model: null,
+    thinkingLevel: null
+  }
+  return tool.execute('call-1', params as never, undefined, undefined, ctx as never)
 }
 
 test("pi extension: registers overrides for pi's read, write and edit tools", async () => {
@@ -149,6 +161,51 @@ test('pi extension: read serves the client buffer instead of disk', async () => 
   const text = JSON.stringify(result)
   assert.ok(text.includes('unsaved buffer content'), `expected buffer content in read result, got: ${text}`)
   assert.ok(!text.includes('stale disk content'), 'read must not fall back to disk when the buffer is available')
+
+  restore()
+})
+
+test('pi extension: registers a bash override only when the client offers a terminal', async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pi-acp-ext-')))
+  const conn = new FakeAgentSideConnection()
+  const { tools, restore } = await setup(dir, conn, true)
+
+  assert.deepEqual([...tools.keys()].sort(), ['bash', 'edit', 'read', 'write'])
+
+  restore()
+})
+
+test("pi extension: bash runs through the client's terminal", async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pi-acp-ext-')))
+  const conn = new FakeAgentSideConnection()
+  conn.terminalOutput = 'delegated output\n'
+  conn.terminalExitCode = 0
+
+  const { tools, restore } = await setup(dir, conn, true)
+
+  const result: any = await runBashTool(tools.get('bash')!, { command: 'echo hi' })
+
+  assert.equal(conn.createTerminalRequests.length, 1, 'expected the command to reach the client')
+  assert.deepEqual(conn.createTerminalRequests[0].args, ['-c', 'echo hi'])
+
+  // pi's own result still carries the output so the model can read it.
+  assert.match(JSON.stringify(result), /delegated output/)
+
+  restore()
+})
+
+test('pi extension: bash falls back to pi local shell when the client refuses', async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'pi-acp-ext-')))
+  const conn = new FakeAgentSideConnection()
+  conn.failCreateTerminal = true
+
+  const { tools, restore } = await setup(dir, conn, true)
+
+  const result: any = await runBashTool(tools.get('bash')!, { command: 'echo local-fallback' })
+
+  assert.equal(conn.createTerminalRequests.length, 1, 'expected one refused attempt')
+  // Ran locally instead of failing the tool outright.
+  assert.match(JSON.stringify(result), /local-fallback/)
 
   restore()
 })

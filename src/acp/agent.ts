@@ -24,7 +24,7 @@ import {
   type DeleteSessionResponse
 } from '@agentclientprotocol/sdk'
 import { getAuthMethods } from './auth.js'
-import { NO_CLIENT_FS_CAPABILITIES, type ClientFsCapabilities } from './client-fs.js'
+import { NO_CLIENT_DELEGATION_CAPABILITIES, type ClientDelegationCapabilities } from './client-fs.js'
 import { FsBridgeServer } from './fs-bridge.js'
 import { SessionManager, type PiAcpSession } from './session.js'
 import { SessionStore } from './session-store.js'
@@ -137,7 +137,7 @@ export class PiAcpAgent implements ACPAgent {
 
   // Captured from clientCapabilities during initialize; sessions use these to
   // route file access through the client (e.g. Zed buffers) when supported.
-  private clientFsCapabilities: ClientFsCapabilities = NO_CLIENT_FS_CAPABILITIES
+  private delegationCapabilities: ClientDelegationCapabilities = NO_CLIENT_DELEGATION_CAPABILITIES
 
   constructor(conn: AgentSideConnection, _config?: unknown) {
     this.conn = conn
@@ -206,7 +206,7 @@ export class PiAcpAgent implements ACPAgent {
       const fsBridge = await FsBridgeServer.maybeStart({
         conn: this.conn,
         cwd,
-        capabilities: this.clientFsCapabilities
+        capabilities: this.delegationCapabilities
       })
 
       let proc: PiRpcProcess
@@ -232,7 +232,7 @@ export class PiAcpAgent implements ACPAgent {
         conn: this.conn,
         proc,
         fileCommands,
-        clientFsCapabilities: this.clientFsCapabilities,
+        delegationCapabilities: this.delegationCapabilities,
         fsBridge
       })
 
@@ -258,9 +258,10 @@ export class PiAcpAgent implements ACPAgent {
     const supportedVersion = 1
     const requested = params.protocolVersion
 
-    this.clientFsCapabilities = {
+    this.delegationCapabilities = {
       readTextFile: params.clientCapabilities?.fs?.readTextFile === true,
-      writeTextFile: params.clientCapabilities?.fs?.writeTextFile === true
+      writeTextFile: params.clientCapabilities?.fs?.writeTextFile === true,
+      terminal: params.clientCapabilities?.terminal === true
     }
 
     return {
@@ -310,7 +311,7 @@ export class PiAcpAgent implements ACPAgent {
       conn: this.conn,
       fileCommands,
       piCommand: process.env.PI_ACP_PI_COMMAND,
-      clientFsCapabilities: this.clientFsCapabilities
+      delegationCapabilities: this.delegationCapabilities
     })
 
     // Fetch state + models once (parallel) to reduce startup latency.

@@ -12,7 +12,7 @@ import { readFileSync } from 'node:fs'
 import { isAbsolute, resolve as resolvePath } from 'node:path'
 import { PiRpcProcess, PiRpcSpawnError, type PiRpcEvent } from '../pi-rpc/process.js'
 import { maybeAuthRequiredError } from './auth-required.js'
-import { ClientFs, NO_CLIENT_FS_CAPABILITIES, type ClientFsCapabilities } from './client-fs.js'
+import { ClientFs, NO_CLIENT_DELEGATION_CAPABILITIES, type ClientDelegationCapabilities } from './client-fs.js'
 import { FsBridgeServer } from './fs-bridge.js'
 import { SessionStore } from './session-store.js'
 import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
@@ -35,7 +35,7 @@ type SessionCreateParams = {
   conn: AgentSideConnection
   fileCommands?: import('./slash-commands.js').FileSlashCommand[]
   piCommand?: string
-  clientFsCapabilities?: ClientFsCapabilities
+  delegationCapabilities?: ClientDelegationCapabilities
 }
 
 export type StopReason = 'end_turn' | 'cancelled' | 'error'
@@ -193,7 +193,7 @@ export class SessionManager {
     const fsBridge = await FsBridgeServer.maybeStart({
       conn: params.conn,
       cwd: params.cwd,
-      capabilities: params.clientFsCapabilities
+      capabilities: params.delegationCapabilities
     })
 
     // Let pi manage session persistence in its default location (~/.pi/agent/sessions/...)
@@ -234,7 +234,7 @@ export class SessionManager {
       proc,
       conn: params.conn,
       fileCommands: params.fileCommands ?? [],
-      clientFsCapabilities: params.clientFsCapabilities,
+      delegationCapabilities: params.delegationCapabilities,
       fsBridge
     })
 
@@ -268,7 +268,7 @@ export class SessionManager {
       proc: params.proc,
       conn: params.conn,
       fileCommands: params.fileCommands ?? [],
-      clientFsCapabilities: params.clientFsCapabilities,
+      delegationCapabilities: params.delegationCapabilities,
       fsBridge: params.fsBridge ?? null
     })
 
@@ -315,6 +315,12 @@ export class PiAcpSession {
   private bashToolCallIds = new Set<string>()
   private bashOutputSnapshots = new Map<string, string>()
 
+  // When the client owns the terminal, bash tool calls are announced before the
+  // client terminal exists. Queue them here so the terminalId can be attached as
+  // soon as the bridge creates it.
+  private terminalDelegated = false
+  private bashAwaitingTerminal: Array<{ toolCallId: string; command: string }> = []
+
   // Ensure `session/update` notifications are sent in order and can be awaited
   // before completing a `session/prompt` request.
   private lastEmit: Promise<void> = Promise.resolve()
@@ -329,7 +335,7 @@ export class PiAcpSession {
     proc: PiRpcProcess
     conn: AgentSideConnection
     fileCommands?: FileSlashCommand[]
-    clientFsCapabilities?: ClientFsCapabilities
+    delegationCapabilities?: ClientDelegationCapabilities
     fsBridge?: FsBridgeServer | null
   }) {
     this.sessionId = opts.sessionId
@@ -342,9 +348,15 @@ export class PiAcpSession {
       opts.conn,
       opts.sessionId,
       opts.cwd,
-      opts.clientFsCapabilities ?? NO_CLIENT_FS_CAPABILITIES
+      opts.delegationCapabilities ?? NO_CLIENT_DELEGATION_CAPABILITIES
     )
     this.fsBridge = opts.fsBridge ?? null
+
+    // With a client-owned terminal the editor spawns the command and renders it
+    // live, so we attach its real terminalId instead of the `_meta` pseudo-terminal
+    // we synthesize when running bash inside pi.
+    this.terminalDelegated = opts.delegationCapabilities?.terminal === true && this.fsBridge !== null
+    this.fsBridge?.setTerminalListener(info => this.attachClientTerminal(info))
 
     this.proc.onEvent(ev => this.handlePiEvent(ev))
   }
@@ -478,15 +490,43 @@ export class PiAcpSession {
     includeTerminal: boolean
   }): void {
     this.bashToolCallIds.add(params.toolCallId)
+    const command = bashCommand(params.args)
+
+    if (params.includeTerminal && this.terminalDelegated) {
+      // The real terminalId only exists once pi actually runs the command and the
+      // bridge calls terminal/create; attachClientTerminal fills it in then.
+      this.bashAwaitingTerminal.push({ toolCallId: params.toolCallId, command: command ?? '' })
+    }
+
+    const includeSyntheticTerminal = params.includeTerminal && !this.terminalDelegated
+
     this.emit({
       sessionUpdate: params.sessionUpdate,
       toolCallId: params.toolCallId,
-      title: bashCommand(params.args) ?? params.toolName,
+      title: command ?? params.toolName,
       kind: 'execute',
       status: params.status,
       locations: params.locations,
-      ...(params.includeTerminal ? { content: bashTerminalContent(params.toolCallId) } : {}),
-      ...(params.includeTerminal ? { _meta: bashTerminalInfoMeta(params.toolCallId, this.cwd) } : {})
+      ...(includeSyntheticTerminal ? { content: bashTerminalContent(params.toolCallId) } : {}),
+      ...(includeSyntheticTerminal ? { _meta: bashTerminalInfoMeta(params.toolCallId, this.cwd) } : {})
+    })
+  }
+
+  /**
+   * Attach a client-created terminal to the bash tool call that triggered it.
+   *
+   * pi runs tools sequentially, so the oldest queued bash call is the one that just
+   * started; the command is used as a guard in case events interleave.
+   */
+  private attachClientTerminal(info: { terminalId: string; command: string }): void {
+    const index = this.bashAwaitingTerminal.findIndex(entry => entry.command === info.command)
+    const entry = this.bashAwaitingTerminal.splice(index >= 0 ? index : 0, 1)[0]
+    if (!entry) return
+
+    this.emit({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: entry.toolCallId,
+      content: [{ type: 'terminal', terminalId: info.terminalId }]
     })
   }
 
@@ -496,6 +536,17 @@ export class PiAcpSession {
     result: unknown
     isError?: boolean
   }): void {
+    if (this.terminalDelegated) {
+      // The client's own terminal is the live view and reports its own exit
+      // status; echoing pi's copy back would render the output twice.
+      this.emit({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: params.toolCallId,
+        status: params.status
+      })
+      return
+    }
+
     const text = bashResultText(params.result)
     const previous = this.bashOutputSnapshots.get(params.toolCallId) ?? ''
     const delta = bashOutputDelta(previous, text)
@@ -520,6 +571,8 @@ export class PiAcpSession {
     this.fileMutationToolCallIds.delete(toolCallId)
     this.bashToolCallIds.delete(toolCallId)
     this.bashOutputSnapshots.delete(toolCallId)
+    // Drop any terminal that never arrived (e.g. the extension fell back to pi's local shell).
+    this.bashAwaitingTerminal = this.bashAwaitingTerminal.filter(entry => entry.toolCallId !== toolCallId)
   }
 
   private startTurn(t: QueuedTurn): void {

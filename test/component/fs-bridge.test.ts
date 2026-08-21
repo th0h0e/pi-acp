@@ -52,7 +52,7 @@ async function startBridge(cwd: string, conn: FakeAgentSideConnection) {
   const bridge = await FsBridgeServer.maybeStart({
     conn: asAgentConn(conn),
     cwd,
-    capabilities: { readTextFile: true, writeTextFile: true }
+    capabilities: { readTextFile: true, writeTextFile: true, terminal: false }
   })
   assert.ok(bridge, 'expected bridge to start')
   bridge.setSessionId('s1')
@@ -69,7 +69,7 @@ test('fs bridge: is not started when the client advertises no fs capabilities', 
   const bridge = await FsBridgeServer.maybeStart({
     conn: asAgentConn(new FakeAgentSideConnection()),
     cwd: mkdtempSync(join(tmpdir(), 'pi-acp-bridge-')),
-    capabilities: { readTextFile: false, writeTextFile: false }
+    capabilities: { readTextFile: false, writeTextFile: false, terminal: false }
   })
   assert.equal(bridge, null, 'expected no bridge without fs capabilities')
 })

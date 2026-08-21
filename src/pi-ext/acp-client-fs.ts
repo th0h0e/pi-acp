@@ -15,16 +15,20 @@
  * observe unsaved changes.
  */
 import {
+  createBashToolDefinition,
   createEditToolDefinition,
+  createLocalBashOperations,
   createReadToolDefinition,
   createWriteToolDefinition,
+  type BashOperations,
   type ExtensionAPI
 } from '@earendil-works/pi-coding-agent'
 import { access, mkdir } from 'node:fs/promises'
 import { connect, type Socket } from 'node:net'
 import { createInterface } from 'node:readline'
 
-type Pending = { resolve: (value: { content?: string }) => void; reject: (err: Error) => void }
+type BridgeResponse = { content?: string; exitCode?: number | null }
+type Pending = { resolve: (value: BridgeResponse) => void; reject: (err: Error) => void }
 
 class BridgeClient {
   private socket: Socket | null = null
@@ -77,7 +81,7 @@ class BridgeClient {
   }
 
   private handleLine(line: string): void {
-    let msg: { id?: unknown; ok?: unknown; content?: unknown; error?: unknown }
+    let msg: { id?: unknown; ok?: unknown; content?: unknown; error?: unknown; exitCode?: unknown }
     try {
       msg = JSON.parse(line)
     } catch {
@@ -93,7 +97,10 @@ class BridgeClient {
     this.updateSocketRef()
 
     if (msg.ok === true) {
-      pending.resolve({ content: typeof msg.content === 'string' ? msg.content : undefined })
+      pending.resolve({
+        content: typeof msg.content === 'string' ? msg.content : undefined,
+        exitCode: typeof msg.exitCode === 'number' ? msg.exitCode : null
+      })
     } else {
       pending.reject(new Error(typeof msg.error === 'string' ? msg.error : 'pi-acp fs bridge request failed'))
     }
@@ -106,14 +113,17 @@ class BridgeClient {
     else this.socket.unref()
   }
 
-  async request(op: 'read' | 'write', path: string, content?: string): Promise<{ content?: string }> {
-    const socket = await this.ensureSocket()
-    const id = `${this.counter++}`
+  nextId(): string {
+    return `${this.counter++}`
+  }
 
-    return new Promise<{ content?: string }>((resolve, reject) => {
+  async request(payload: Record<string, unknown>, id = this.nextId()): Promise<BridgeResponse> {
+    const socket = await this.ensureSocket()
+
+    return new Promise<BridgeResponse>((resolve, reject) => {
       this.pending.set(id, { resolve, reject })
       this.updateSocketRef()
-      socket.write(`${JSON.stringify({ id, op, path, content })}\n`, err => {
+      socket.write(`${JSON.stringify({ id, ...payload })}\n`, err => {
         if (err) {
           this.pending.delete(id)
           this.updateSocketRef()
@@ -130,7 +140,8 @@ export default function (pi: ExtensionAPI) {
 
   const canRead = process.env.PI_ACP_FS_READ === '1'
   const canWrite = process.env.PI_ACP_FS_WRITE === '1'
-  if (!canRead && !canWrite) return
+  const canRunTerminal = process.env.PI_ACP_TERMINAL === '1'
+  if (!canRead && !canWrite && !canRunTerminal) return
 
   const bridge = new BridgeClient(socketPath)
   // pi-acp spawns pi with the session cwd, so this matches the ACP session cwd
@@ -138,12 +149,12 @@ export default function (pi: ExtensionAPI) {
   const cwd = process.cwd()
 
   const readFile = async (absolutePath: string): Promise<Buffer> => {
-    const res = await bridge.request('read', absolutePath)
+    const res = await bridge.request({ op: 'read', path: absolutePath })
     return Buffer.from(res.content ?? '', 'base64')
   }
 
   const writeFile = async (absolutePath: string, content: string): Promise<void> => {
-    await bridge.request('write', absolutePath, content)
+    await bridge.request({ op: 'write', path: absolutePath, content })
   }
 
   // Permission/existence checks stay local: the client writes to real paths, so
@@ -167,5 +178,46 @@ export default function (pi: ExtensionAPI) {
   // edit needs both halves: read the current text, then write the result.
   if (canRead && canWrite) {
     pi.registerTool(createEditToolDefinition(cwd, { operations: { readFile, writeFile, access: accessFile } }))
+  }
+
+  if (canRunTerminal) {
+    const local = createLocalBashOperations()
+
+    const exec: BashOperations['exec'] = async (command, execCwd, options) => {
+      const runId = bridge.nextId()
+
+      // pi aborts long-running commands via the signal; forward that to the
+      // client so its terminal stop control and pi's own cancellation agree.
+      const onAbort = () => void bridge.request({ op: 'terminal_kill', runId }).catch(() => {})
+      options.signal?.addEventListener('abort', onAbort, { once: true })
+
+      try {
+        const res = await bridge.request(
+          {
+            op: 'terminal_run',
+            command,
+            cwd: execCwd,
+            env: options.env,
+            timeout: options.timeout
+          },
+          runId
+        )
+
+        // The client renders output live in its own terminal; this hand-off exists
+        // so pi's tool result still carries the text for the model.
+        const output = Buffer.from(res.content ?? '', 'base64')
+        if (output.length) options.onData(output)
+
+        return { exitCode: res.exitCode ?? null }
+      } catch {
+        // No terminal capability, or the client refused: run it locally the way
+        // stock pi would, so bash keeps working rather than failing the tool.
+        return local.exec(command, execCwd, options)
+      } finally {
+        options.signal?.removeEventListener('abort', onAbort)
+      }
+    }
+
+    pi.registerTool(createBashToolDefinition(cwd, { operations: { exec } }))
   }
 }

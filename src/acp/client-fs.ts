@@ -2,14 +2,17 @@ import type { AgentSideConnection } from '@agentclientprotocol/sdk'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { isAbsolute, resolve as resolvePath } from 'node:path'
 
-export type ClientFsCapabilities = {
+/** ACP client capabilities that let pi delegate work back to the editor. */
+export type ClientDelegationCapabilities = {
   readTextFile: boolean
   writeTextFile: boolean
+  terminal: boolean
 }
 
-export const NO_CLIENT_FS_CAPABILITIES: ClientFsCapabilities = {
+export const NO_CLIENT_DELEGATION_CAPABILITIES: ClientDelegationCapabilities = {
   readTextFile: false,
-  writeTextFile: false
+  writeTextFile: false,
+  terminal: false
 }
 
 /**
@@ -24,7 +27,7 @@ export class ClientFs {
     private readonly conn: AgentSideConnection,
     private readonly sessionId: string,
     private readonly cwd: string,
-    private readonly capabilities: ClientFsCapabilities
+    private readonly capabilities: ClientDelegationCapabilities
   ) {}
 
   // ACP requires absolute paths; pi tools commonly produce cwd-relative ones.

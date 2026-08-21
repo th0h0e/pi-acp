@@ -24,32 +24,41 @@ Use `@agentclientprotocol/sdk`:
 
 ## Implementation constraints / decisions
 
-- ACP client-side **filesystem** delegation is implemented (see "Client filesystem delegation" below). ACP **terminal** delegation is still not implemented; pi executes locally.
+- ACP client-side **filesystem** and **terminal** delegation are implemented (see "Client delegation" below).
 - Ignore `mcpServers` for MVP (accept in params, store in session state).
 - Stream all pi assistant output as ACP `agent_message_chunk` initially.
 - Tool events: map pi tool execution events to ACP `tool_call` / `tool_call_update` (as text content).
 
-## Client filesystem delegation
+## Client delegation
 
 When the ACP client advertises `fs.readTextFile` / `fs.writeTextFile`, file access is
 routed through the client so the editor owns agent edits (they land in its buffers as
-reviewable, undoable changes) and reads observe unsaved work.
+reviewable, undoable changes) and reads observe unsaved work. When it advertises
+`terminal`, pi's `bash` tool runs in a client-owned terminal (`terminal/create`) so the
+editor renders a real PTY and its stop control maps to `terminal/kill`.
 
-Pi performs its own file I/O inside its subprocess, so the adapter cannot intercept it
-from the outside. Instead:
+Pi performs its own file I/O and command execution inside its subprocess, so the adapter
+cannot intercept them from the outside. Instead:
 
 - `src/pi-ext/acp-client-fs.ts` is a **pi extension** loaded into the subprocess with
-  `pi --extension`. It re-registers pi's own `read`/`write`/`edit` tool definitions
+  `pi --extension`. It re-registers pi's own `read`/`write`/`edit`/`bash` tool definitions
   (`createReadToolDefinition` and friends) with custom `operations`, so schemas, result
   shapes, diffs and renderers stay identical to the built-ins and only the I/O is redirected.
 - `src/acp/fs-bridge.ts` runs a local socket server in the adapter. The extension calls it;
   it forwards to the ACP client and falls back to disk if the client refuses or errors.
+  It also owns the client terminal lifecycle and notifies the session, via
+  `setTerminalListener`, of the `terminalId` to attach to the running `bash` tool call.
 - `src/acp/client-fs.ts` is the adapter-side wrapper used for pre-edit diff snapshots.
 
 Set `PI_ACP_DISABLE_CLIENT_FS=1` to force the legacy disk-only behavior.
 
-Both halves must stay tolerant of failure: any client error falls back to local disk so the
-adapter still works with clients that advertise the capability but reject specific paths.
+Every path must stay tolerant of failure: a client error falls back to local disk (fs) or
+pi's local shell (`createLocalBashOperations`, for bash), so the adapter still works with
+clients that advertise a capability but reject specific paths or commands.
+
+When the client owns the terminal, the session must not also emit the `_meta` pseudo-terminal
+(`bashTerminalInfoMeta` and friends in `src/acp/translate/bash.ts`) or echo pi's captured
+output — the client already renders both, and doing so duplicates the output.
 
 ## Dev workflow (to be filled once scaffold exists)
 
