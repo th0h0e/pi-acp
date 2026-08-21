@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { toolResultToText } from '../../src/acp/translate/pi-tools.js'
+import { toolResultToText, toToolKind } from '../../src/acp/translate/pi-tools.js'
 
 test('toolResultToText: extracts text from content blocks', () => {
   const text = toolResultToText({
@@ -37,4 +37,19 @@ test('toolResultToText: extracts bash stdout/stderr from details', () => {
   assert.match(text, /stderr:/)
   assert.match(text, /warn/)
   assert.match(text, /exit code: 0/)
+})
+
+test('toToolKind: maps pi built-in tools to ACP tool kinds', () => {
+  assert.equal(toToolKind('read'), 'read')
+  assert.equal(toToolKind('ls'), 'read')
+  assert.equal(toToolKind('write'), 'edit')
+  assert.equal(toToolKind('edit'), 'edit')
+  assert.equal(toToolKind('grep'), 'search')
+  assert.equal(toToolKind('find'), 'search')
+  assert.equal(toToolKind('bash'), 'execute')
+})
+
+test('toToolKind: unknown tools fall back to other', () => {
+  assert.equal(toToolKind('mcp__server__thing'), 'other')
+  assert.equal(toToolKind(''), 'other')
 })

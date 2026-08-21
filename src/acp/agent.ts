@@ -31,7 +31,7 @@ import { SessionStore } from './session-store.js'
 import { PiRpcProcess } from '../pi-rpc/process.js'
 import { listPiSessions, findPiSession } from './pi-sessions.js'
 import { normalizePiAssistantText, normalizePiMessageText } from './translate/pi-messages.js'
-import { toolResultToText } from './translate/pi-tools.js'
+import { toolResultToText, toToolKind } from './translate/pi-tools.js'
 import {
   bashCommand,
   bashExitCode,
@@ -1064,7 +1064,7 @@ export class PiAcpAgent implements ACPAgent {
             sessionUpdate: 'tool_call',
             toolCallId,
             title: toolName,
-            kind: toolName === 'read' ? 'read' : toolName === 'write' || toolName === 'edit' ? 'edit' : 'other',
+            kind: toToolKind(toolName),
             status: 'completed',
             rawInput: null,
             rawOutput: m

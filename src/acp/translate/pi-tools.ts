@@ -1,3 +1,5 @@
+import type { ToolKind } from '@agentclientprotocol/sdk'
+
 export function toolResultToText(result: unknown): string {
   if (!result) return ''
 
@@ -47,5 +49,28 @@ export function toolResultToText(result: unknown): string {
     return JSON.stringify(result, null, 2)
   } catch {
     return String(result)
+  }
+}
+
+/**
+ * Map a pi tool name to the ACP tool kind that drives the client's icon and
+ * grouping. pi's built-ins are `bash`, `edit`, `find`, `grep`, `ls`, `read`
+ * and `write`; anything else (extension or MCP tools) falls back to `other`.
+ */
+export function toToolKind(toolName: string): ToolKind {
+  switch (toolName) {
+    case 'read':
+    case 'ls':
+      return 'read'
+    case 'write':
+    case 'edit':
+      return 'edit'
+    case 'grep':
+    case 'find':
+      return 'search'
+    case 'bash':
+      return 'execute'
+    default:
+      return 'other'
   }
 }
