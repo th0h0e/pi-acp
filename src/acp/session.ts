@@ -13,6 +13,8 @@ import { readFileSync } from 'node:fs'
 import { isAbsolute, resolve as resolvePath } from 'node:path'
 import { PiRpcProcess, PiRpcSpawnError, type PiRpcEvent } from '../pi-rpc/process.js'
 import { maybeAuthRequiredError } from './auth-required.js'
+import { ClientFs, NO_CLIENT_FS_CAPABILITIES, type ClientFsCapabilities } from './client-fs.js'
+import { FsBridgeServer } from './fs-bridge.js'
 import { SessionStore } from './session-store.js'
 import { expandSlashCommand, type FileSlashCommand } from './slash-commands.js'
 import {
@@ -34,6 +36,7 @@ type SessionCreateParams = {
   conn: AgentSideConnection
   fileCommands?: import('./slash-commands.js').FileSlashCommand[]
   piCommand?: string
+  clientFsCapabilities?: ClientFsCapabilities
 }
 
 export type StopReason = 'end_turn' | 'cancelled' | 'error'
@@ -173,6 +176,7 @@ export class SessionManager {
     } catch {
       // ignore
     }
+    s.fsBridge?.close()
     this.sessions.delete(sessionId)
   }
 
@@ -185,15 +189,25 @@ export class SessionManager {
   }
 
   async create(params: SessionCreateParams): Promise<PiAcpSession> {
+    // When the client offers fs capabilities, start the bridge that lets a pi
+    // extension delegate edit/write file operations back through the client.
+    const fsBridge = await FsBridgeServer.maybeStart({
+      conn: params.conn,
+      cwd: params.cwd,
+      capabilities: params.clientFsCapabilities
+    })
+
     // Let pi manage session persistence in its default location (~/.pi/agent/sessions/...)
     // so sessions are visible to the regular `pi` CLI.
     let proc: PiRpcProcess
     try {
       proc = await PiRpcProcess.spawn({
         cwd: params.cwd,
-        piCommand: params.piCommand
+        piCommand: params.piCommand,
+        ...(fsBridge ? fsBridge.spawnExtras() : {})
       })
     } catch (e) {
+      fsBridge?.close()
       if (e instanceof PiRpcSpawnError) {
         throw RequestError.internalError({ code: e.code }, e.message)
       }
@@ -220,8 +234,12 @@ export class SessionManager {
       mcpServers: params.mcpServers,
       proc,
       conn: params.conn,
-      fileCommands: params.fileCommands ?? []
+      fileCommands: params.fileCommands ?? [],
+      clientFsCapabilities: params.clientFsCapabilities,
+      fsBridge
     })
+
+    fsBridge?.setSessionId(sessionId)
 
     this.sessions.set(sessionId, session)
     return session
@@ -237,7 +255,10 @@ export class SessionManager {
    * Used by session/load: create a session object bound to an existing sessionId/proc
    * if it isn't already registered.
    */
-  getOrCreate(sessionId: string, params: SessionCreateParams & { proc: PiRpcProcess }): PiAcpSession {
+  getOrCreate(
+    sessionId: string,
+    params: SessionCreateParams & { proc: PiRpcProcess; fsBridge?: FsBridgeServer | null }
+  ): PiAcpSession {
     const existing = this.sessions.get(sessionId)
     if (existing) return existing
 
@@ -247,7 +268,9 @@ export class SessionManager {
       mcpServers: params.mcpServers,
       proc: params.proc,
       conn: params.conn,
-      fileCommands: params.fileCommands ?? []
+      fileCommands: params.fileCommands ?? [],
+      clientFsCapabilities: params.clientFsCapabilities,
+      fsBridge: params.fsBridge ?? null
     })
 
     this.sessions.set(sessionId, session)
@@ -285,9 +308,10 @@ export class PiAcpSession {
   private inAgentLoop = false
 
   // For ACP diff support: capture file contents before edit/write mutations,
-  // then emit ToolCallContent {type:"diff"}. Compatible structured edit/write
-  // events may need to be implemented in pi in the future.
-  private fileSnapshots = new Map<string, { path: string; oldText: string | null }>()
+  // then emit ToolCallContent {type:"diff"}. Snapshots are promises because
+  // they may be served by the ACP client (fs/read_text_file), which reflects
+  // unsaved editor buffers.
+  private fileSnapshots = new Map<string, Promise<{ path: string; oldText: string | null }>>()
   private fileMutationToolCallIds = new Set<string>()
   private bashToolCallIds = new Set<string>()
   private bashOutputSnapshots = new Map<string, string>()
@@ -296,6 +320,9 @@ export class PiAcpSession {
   // before completing a `session/prompt` request.
   private lastEmit: Promise<void> = Promise.resolve()
 
+  private readonly clientFs: ClientFs
+  readonly fsBridge: FsBridgeServer | null
+
   constructor(opts: {
     sessionId: string
     cwd: string
@@ -303,6 +330,8 @@ export class PiAcpSession {
     proc: PiRpcProcess
     conn: AgentSideConnection
     fileCommands?: FileSlashCommand[]
+    clientFsCapabilities?: ClientFsCapabilities
+    fsBridge?: FsBridgeServer | null
   }) {
     this.sessionId = opts.sessionId
     this.cwd = opts.cwd
@@ -310,6 +339,13 @@ export class PiAcpSession {
     this.proc = opts.proc
     this.conn = opts.conn
     this.fileCommands = opts.fileCommands ?? []
+    this.clientFs = new ClientFs(
+      opts.conn,
+      opts.sessionId,
+      opts.cwd,
+      opts.clientFsCapabilities ?? NO_CLIENT_FS_CAPABILITIES
+    )
+    this.fsBridge = opts.fsBridge ?? null
 
     this.proc.onEvent(ev => this.handlePiEvent(ev))
   }
@@ -410,6 +446,22 @@ export class PiAcpSession {
       .catch(() => {
         // Ignore notification errors (client may have gone away). We still want
         // prompt completion.
+      })
+  }
+
+  // Like emit(), but the update is produced asynchronously (e.g. after a client
+  // fs/read_text_file round trip). Chaining onto lastEmit keeps updates ordered
+  // and guarantees flushEmits() waits for them before the prompt resolves.
+  private emitAsync(build: () => Promise<SessionUpdate | null>): void {
+    this.lastEmit = this.lastEmit
+      .then(async () => {
+        const update = await build()
+        if (update) {
+          await this.conn.sessionUpdate({ sessionId: this.sessionId, update })
+        }
+      })
+      .catch(() => {
+        // Ignore notification errors (client may have gone away).
       })
   }
 
@@ -614,7 +666,6 @@ export class PiAcpSession {
         const toolCallId = String((ev as any).toolCallId ?? crypto.randomUUID())
         const toolName = String((ev as any).toolName ?? 'tool')
         const args = (ev as any).args
-        let line: number | undefined
 
         if (isBashTool(toolName)) {
           const locations = toToolCallLocations(args, this.cwd)
@@ -633,53 +684,63 @@ export class PiAcpSession {
         }
 
         // Capture pre-mutation file contents so we can emit a structured ACP diff.
+        // Read through the client when possible so the snapshot reflects unsaved
+        // editor buffers instead of stale on-disk contents.
         const isFileMutation = toolName === 'edit' || toolName === 'write'
-        let snapshotOldText: string | null | undefined
+        let snapshot: Promise<{ path: string; oldText: string | null }> | null = null
         if (isFileMutation) {
           this.fileMutationToolCallIds.add(toolCallId)
           const p = getToolPath(args)
           if (p) {
-            try {
-              const abs = isAbsolute(p) ? p : resolvePath(this.cwd, p)
-              snapshotOldText = readFileSync(abs, 'utf8')
-              this.fileSnapshots.set(toolCallId, { path: p, oldText: snapshotOldText })
-
-              if (toolName === 'edit') {
-                for (const needle of getEditOldTexts(args)) {
-                  line = findUniqueLineNumber(snapshotOldText, needle)
-                  if (typeof line === 'number') break
-                }
-              }
-            } catch {
-              snapshotOldText = null
-              this.fileSnapshots.set(toolCallId, { path: p, oldText: null })
-            }
+            snapshot = this.clientFs.readTextFile(p).then(
+              oldText => ({ path: p, oldText }),
+              () => ({ path: p, oldText: null })
+            )
+            this.fileSnapshots.set(toolCallId, snapshot)
           }
         }
 
-        const locations = toToolCallLocations(args, this.cwd, line)
-
         // If we already surfaced the tool call while the model streamed it, just transition.
-        if (!this.currentToolCalls.has(toolCallId)) {
-          this.currentToolCalls.set(toolCallId, 'in_progress')
-          this.emit({
-            sessionUpdate: 'tool_call',
-            toolCallId,
-            title: toolName,
-            kind: toToolKind(toolName),
-            status: 'in_progress',
-            locations,
-            rawInput: args
+        const isNewToolCall = !this.currentToolCalls.has(toolCallId)
+        this.currentToolCalls.set(toolCallId, 'in_progress')
+
+        const buildUpdate = (line?: number): SessionUpdate => {
+          const locations = toToolCallLocations(args, this.cwd, line)
+          return isNewToolCall
+            ? {
+                sessionUpdate: 'tool_call',
+                toolCallId,
+                title: toolName,
+                kind: toToolKind(toolName),
+                status: 'in_progress',
+                locations,
+                rawInput: args
+              }
+            : {
+                sessionUpdate: 'tool_call_update',
+                toolCallId,
+                status: 'in_progress',
+                locations,
+                rawInput: args
+              }
+        }
+
+        if (snapshot && toolName === 'edit') {
+          // Wait for the snapshot so we can point the location at the edited line.
+          const snapshotPromise = snapshot
+          this.emitAsync(async () => {
+            const { oldText } = await snapshotPromise
+            let line: number | undefined
+            if (oldText !== null) {
+              for (const needle of getEditOldTexts(args)) {
+                line = findUniqueLineNumber(oldText, needle)
+                if (typeof line === 'number') break
+              }
+            }
+            return buildUpdate(line)
           })
         } else {
-          this.currentToolCalls.set(toolCallId, 'in_progress')
-          this.emit({
-            sessionUpdate: 'tool_call_update',
-            toolCallId,
-            status: 'in_progress',
-            locations,
-            rawInput: args
-          })
+          this.emit(buildUpdate())
         }
 
         break
@@ -728,40 +789,59 @@ export class PiAcpSession {
 
         const text = toolResultToText(result)
 
-        const snapshot = this.fileSnapshots.get(toolCallId)
-        let content: ToolCallContent[] | undefined
-        let hasStructuredDiff = false
+        const snapshotPromise = this.fileSnapshots.get(toolCallId)
 
-        if (!isError && snapshot) {
-          try {
-            const abs = isAbsolute(snapshot.path) ? snapshot.path : resolvePath(this.cwd, snapshot.path)
-            const newText = readFileSync(abs, 'utf8')
-            if (snapshot.oldText === null || newText !== snapshot.oldText) {
-              hasStructuredDiff = true
-              content = [
-                {
-                  type: 'diff',
-                  path: snapshot.path,
-                  oldText: snapshot.oldText,
-                  newText
-                }
-              ]
+        if (!isError && snapshotPromise) {
+          this.emitAsync(async () => {
+            const snapshot = await snapshotPromise
+            let content: ToolCallContent[] | undefined
+            let hasStructuredDiff = false
+
+            try {
+              // Pi writes to disk, so disk holds the authoritative post-edit text
+              // (the client buffer may not have reloaded it yet).
+              const abs = isAbsolute(snapshot.path) ? snapshot.path : resolvePath(this.cwd, snapshot.path)
+              const newText = readFileSync(abs, 'utf8')
+              if (snapshot.oldText === null || newText !== snapshot.oldText) {
+                hasStructuredDiff = true
+                content = [
+                  {
+                    type: 'diff',
+                    path: snapshot.path,
+                    oldText: snapshot.oldText,
+                    newText
+                  }
+                ]
+              }
+            } catch {
+              // ignore; fall back to text only
             }
-          } catch {
-            // ignore; fall back to text only
-          }
-        }
 
-        if (!content && !hasStructuredDiff && text) {
-          content = [{ type: 'content', content: { type: 'text', text } }] satisfies ToolCallContent[]
+            if (!content && !hasStructuredDiff && text) {
+              content = [{ type: 'content', content: { type: 'text', text } }] satisfies ToolCallContent[]
+            }
+
+            return {
+              sessionUpdate: 'tool_call_update',
+              toolCallId,
+              status: 'completed',
+              content,
+              ...(hasStructuredDiff ? {} : { rawOutput: result })
+            }
+          })
+
+          this.cleanupToolCall(toolCallId)
+          break
         }
 
         this.emit({
           sessionUpdate: 'tool_call_update',
           toolCallId,
           status: isError ? 'failed' : 'completed',
-          content,
-          ...(hasStructuredDiff ? {} : { rawOutput: result })
+          content: text
+            ? ([{ type: 'content', content: { type: 'text', text } }] satisfies ToolCallContent[])
+            : undefined,
+          rawOutput: result
         })
 
         this.cleanupToolCall(toolCallId)

@@ -212,3 +212,81 @@ test('PiAcpSession: emits write diff content for new files on completion', async
   assert.equal(diff.oldText, null)
   assert.equal(diff.newText, 'created\n')
 })
+
+function createClientFsSession(cwd: string) {
+  const conn = new FakeAgentSideConnection()
+  const proc = new FakePiRpcProcess()
+
+  new PiAcpSession({
+    sessionId: 's1',
+    cwd,
+    mcpServers: [],
+    proc: proc as any,
+    conn: asAgentConn(conn),
+    fileCommands: [],
+    clientFsCapabilities: { readTextFile: true, writeTextFile: true }
+  })
+
+  return { conn, proc }
+}
+
+test('PiAcpSession: snapshots via client fs so diffs reflect unsaved buffer contents', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pi-acp-diff-'))
+  mkdirSync(dir, { recursive: true })
+  const filePath = join(dir, 'a.txt')
+  writeFileSync(filePath, 'stale on disk\n', 'utf8')
+
+  const { conn, proc } = createClientFsSession(dir)
+  conn.clientFileContent = 'unsaved buffer\n'
+
+  proc.emit({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'edit', args: { path: 'a.txt' } })
+  await new Promise(r => setTimeout(r, 0))
+
+  writeFileSync(filePath, 'after\n', 'utf8')
+  proc.emit({
+    type: 'tool_execution_end',
+    toolCallId: 't1',
+    isError: false,
+    result: { content: [{ type: 'text', text: 'ok' }] }
+  })
+  await new Promise(r => setTimeout(r, 0))
+
+  assert.equal(conn.readTextFileRequests.length, 1, 'expected snapshot read via client')
+  assert.equal(conn.readTextFileRequests[0].path, filePath, 'expected absolute path in client read')
+
+  const end = completedToolUpdate(conn)
+  assert.ok(end, 'expected completed tool_call_update')
+  const diff = (end.update as any).content?.find((c: any) => c.type === 'diff')
+  assert.ok(diff, 'expected diff content item')
+  assert.equal(diff.oldText, 'unsaved buffer\n', 'old text should come from client buffer, not disk')
+  assert.equal(diff.newText, 'after\n')
+})
+
+test('PiAcpSession: falls back to disk snapshot when client read fails', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pi-acp-diff-'))
+  mkdirSync(dir, { recursive: true })
+  const filePath = join(dir, 'a.txt')
+  writeFileSync(filePath, 'before\n', 'utf8')
+
+  const { conn, proc } = createClientFsSession(dir)
+  // clientFileContent stays null -> readTextFile rejects, adapter falls back to disk.
+
+  proc.emit({ type: 'tool_execution_start', toolCallId: 't1', toolName: 'edit', args: { path: 'a.txt' } })
+  await new Promise(r => setTimeout(r, 0))
+
+  writeFileSync(filePath, 'after\n', 'utf8')
+  proc.emit({
+    type: 'tool_execution_end',
+    toolCallId: 't1',
+    isError: false,
+    result: { content: [{ type: 'text', text: 'ok' }] }
+  })
+  await new Promise(r => setTimeout(r, 0))
+
+  const end = completedToolUpdate(conn)
+  assert.ok(end, 'expected completed tool_call_update')
+  const diff = (end.update as any).content?.find((c: any) => c.type === 'diff')
+  assert.ok(diff, 'expected diff content item')
+  assert.equal(diff.oldText, 'before\n')
+  assert.equal(diff.newText, 'after\n')
+})

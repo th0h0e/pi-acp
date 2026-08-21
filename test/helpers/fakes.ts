@@ -6,6 +6,24 @@ type SessionUpdateMsg = Parameters<AgentSideConnection['sessionUpdate']>[0]
 export class FakeAgentSideConnection {
   readonly updates: SessionUpdateMsg[] = []
   readonly permissionRequests: unknown[] = []
+  readonly readTextFileRequests: Array<{ sessionId: string; path: string }> = []
+  readonly writeTextFileRequests: Array<{ sessionId: string; path: string; content: string }> = []
+
+  // When set, readTextFile serves this content (simulates an editor buffer with
+  // unsaved changes). Otherwise it rejects, as a client without the file would.
+  clientFileContent: string | null = null
+  failClientWrites = false
+
+  async readTextFile(params: { sessionId: string; path: string }): Promise<{ content: string }> {
+    this.readTextFileRequests.push(params)
+    if (this.clientFileContent === null) throw new Error('no buffer for file')
+    return { content: this.clientFileContent }
+  }
+
+  async writeTextFile(params: { sessionId: string; path: string; content: string }): Promise<void> {
+    this.writeTextFileRequests.push(params)
+    if (this.failClientWrites) throw new Error('client refused write')
+  }
   nextPermissionResponse: { outcome: { outcome: 'selected'; optionId: string } | { outcome: 'cancelled' } } = {
     outcome: { outcome: 'selected', optionId: 'allow' }
   }

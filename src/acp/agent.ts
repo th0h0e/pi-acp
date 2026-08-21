@@ -24,6 +24,7 @@ import {
   type DeleteSessionResponse
 } from '@agentclientprotocol/sdk'
 import { getAuthMethods } from './auth.js'
+import { NO_CLIENT_FS_CAPABILITIES, type ClientFsCapabilities } from './client-fs.js'
 import { SessionManager, type PiAcpSession } from './session.js'
 import { SessionStore } from './session-store.js'
 import { PiRpcProcess } from '../pi-rpc/process.js'
@@ -133,6 +134,10 @@ export class PiAcpAgent implements ACPAgent {
   // Remember recent session cwd and use it as the default filter.
   private lastSessionCwd: string | null = null
 
+  // Captured from clientCapabilities during initialize; sessions use these to
+  // route file access through the client (e.g. Zed buffers) when supported.
+  private clientFsCapabilities: ClientFsCapabilities = NO_CLIENT_FS_CAPABILITIES
+
   constructor(conn: AgentSideConnection, _config?: unknown) {
     this.conn = conn
     void _config
@@ -216,7 +221,8 @@ export class PiAcpAgent implements ACPAgent {
         mcpServers: opts?.mcpServers ?? [],
         conn: this.conn,
         proc,
-        fileCommands
+        fileCommands,
+        clientFsCapabilities: this.clientFsCapabilities
       })
 
       this.lastSessionCwd = cwd
@@ -238,6 +244,11 @@ export class PiAcpAgent implements ACPAgent {
     // We currently only support ACP protocol version 1.
     const supportedVersion = 1
     const requested = params.protocolVersion
+
+    this.clientFsCapabilities = {
+      readTextFile: params.clientCapabilities?.fs?.readTextFile === true,
+      writeTextFile: params.clientCapabilities?.fs?.writeTextFile === true
+    }
 
     return {
       protocolVersion: requested === supportedVersion ? requested : supportedVersion,
@@ -285,7 +296,8 @@ export class PiAcpAgent implements ACPAgent {
       mcpServers: params.mcpServers,
       conn: this.conn,
       fileCommands,
-      piCommand: process.env.PI_ACP_PI_COMMAND
+      piCommand: process.env.PI_ACP_PI_COMMAND,
+      clientFsCapabilities: this.clientFsCapabilities
     })
 
     // Fetch state + models once (parallel) to reduce startup latency.

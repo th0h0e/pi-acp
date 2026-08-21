@@ -74,6 +74,10 @@ type SpawnParams = {
   piCommand?: string
   /** If set, pi will persist the session to this exact file (via `--session <path>`). */
   sessionPath?: string
+  /** If set, pi loads this extension file (via `--extension <path>`). */
+  extensionPath?: string
+  /** Extra environment variables for the pi subprocess. */
+  extraEnv?: Record<string, string>
 }
 
 export class PiRpcProcess {
@@ -136,11 +140,12 @@ export class PiRpcProcess {
     // (e.g. MCP extensions, prompt templates for workflows).
     const args = ['--mode', 'rpc', '--no-themes']
     if (params.sessionPath) args.push('--session', params.sessionPath)
+    if (params.extensionPath) args.push('--extension', params.extensionPath)
 
     const child = spawn(cmd, args, {
       cwd: params.cwd,
       stdio: 'pipe',
-      env: process.env,
+      env: params.extraEnv ? { ...process.env, ...params.extraEnv } : process.env,
       shell: shouldUseShellForPiCommand(cmd)
     })
 

@@ -18,6 +18,11 @@ Expect some minor breaking changes.
   - Relative file paths from pi are resolved against the session cwd before being emitted as ACP tool locations, which enables follow-along features in clients like Zed
   - For `edit`, `pi-acp` attempts to infer a 1-based line number from a unique `oldText` match in the pre-edit file snapshot and includes it in the emitted tool location when possible
   - For `edit`, `pi-acp` snapshots the file before the tool runs and emits an ACP **structured diff** (`oldText`/`newText`) on completion when possible
+- Client filesystem delegation (`fs/*`)
+  - When the client advertises `fs.readTextFile` / `fs.writeTextFile`, pi's `read`, `write` and `edit` tools are routed through the client instead of touching disk directly
+  - The editor performs the write, so agent edits appear in your open buffer as reviewable, undoable changes rather than only as a diff in the chat panel
+  - Reads are served from the editor buffer, so the agent sees unsaved changes instead of a stale file
+  - Falls back to direct disk access for clients without the capability, or whenever a client request fails; set `PI_ACP_DISABLE_CLIENT_FS=1` to disable it entirely
 - Session persistence
   - pi stores its own sessions in `~/.pi/agent/sessions/...`
   - `pi-acp` stores a small mapping file at `~/.pi/pi-acp/session-map.json` so `session/load` can reattach to a previous pi session file
@@ -191,10 +196,11 @@ Project layout:
 
 - `src/acp/*` – ACP server + translation layer
 - `src/pi-rpc/*` – pi subprocess wrapper (RPC protocol)
+- `src/pi-ext/*` – pi extension loaded into the pi subprocess to delegate file I/O to the ACP client
 
 ## Limitations
 
-- No ACP filesystem delegation (`fs/*`) and no ACP terminal delegation (`terminal/*`). pi reads/writes and executes locally.
+- No ACP terminal delegation (`terminal/*`); pi executes shell commands locally.
 - MCP servers are accepted in ACP params and stored in session state, but not wired through to pi in this adapter. If you use [pi MCP adapter](https://github.com/nicobailon/pi-mcp-adapter) it will be available in the ACP client.
 - Assistant streaming is currently sent as `agent_message_chunk` (no separate thought stream).
 - Queue is implemented client-side and should work like pi's `one-at-a-time`
