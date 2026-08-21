@@ -25,6 +25,7 @@ import {
 } from '@agentclientprotocol/sdk'
 import { getAuthMethods } from './auth.js'
 import { NO_CLIENT_FS_CAPABILITIES, type ClientFsCapabilities } from './client-fs.js'
+import { FsBridgeServer } from './fs-bridge.js'
 import { SessionManager, type PiAcpSession } from './session.js'
 import { SessionStore } from './session-store.js'
 import { PiRpcProcess } from '../pi-rpc/process.js'
@@ -201,14 +202,23 @@ export class PiAcpAgent implements ACPAgent {
 
       const cwd = opts?.cwd ?? stored.cwd
 
+      // Resumed sessions need the same client-fs delegation as new ones.
+      const fsBridge = await FsBridgeServer.maybeStart({
+        conn: this.conn,
+        cwd,
+        capabilities: this.clientFsCapabilities
+      })
+
       let proc: PiRpcProcess
       try {
         proc = await PiRpcProcess.spawn({
           cwd,
           sessionPath: stored.sessionFile,
-          piCommand: process.env.PI_ACP_PI_COMMAND
+          piCommand: process.env.PI_ACP_PI_COMMAND,
+          ...(fsBridge ? fsBridge.spawnExtras() : {})
         })
       } catch (e: any) {
+        fsBridge?.close()
         if (e?.name === 'PiRpcSpawnError') {
           throw RequestError.internalError({ code: e?.code }, String(e?.message ?? e))
         }
@@ -222,8 +232,11 @@ export class PiAcpAgent implements ACPAgent {
         conn: this.conn,
         proc,
         fileCommands,
-        clientFsCapabilities: this.clientFsCapabilities
+        clientFsCapabilities: this.clientFsCapabilities,
+        fsBridge
       })
+
+      fsBridge?.setSessionId(sessionId)
 
       this.lastSessionCwd = cwd
       this.store.upsert({ sessionId, cwd, sessionFile: stored.sessionFile })
