@@ -200,13 +200,46 @@ Project layout:
 
 - `src/acp/*` – ACP server + translation layer
 - `src/pi-rpc/*` – pi subprocess wrapper (RPC protocol)
-- `src/pi-ext/*` – pi extension loaded into the pi subprocess to delegate file I/O to the ACP client
+- `src/pi-ext/*` – pi extension loaded into the pi subprocess to delegate file I/O and command execution to the ACP client
+
+## Compatibility with other pi extensions
+
+To delegate file I/O and command execution, `pi-acp` loads its own extension into the pi
+subprocess (`pi --extension`) which overrides pi's `read`, `write`, `edit` and `bash` tools.
+
+This is **additive**: your normally auto-discovered extensions (`~/.pi/agent/extensions/`,
+`<project>/.pi/extensions/`, and `packages` / `extensions` in `settings.json`) still load as
+usual. Extensions that add new tools, commands, event handlers or providers are unaffected,
+and `grep`, `find` and `ls` are left untouched.
+
+**The exception:** pi refuses to load two extensions that register the same tool name. If one
+of your extensions also overrides `read`, `write`, `edit` or `bash` — e.g. to add logging or
+access control — pi fails to start:
+
+```
+Error: Failed to load extension ".../my-extension.ts": Tool "read" conflicts with .../dist/acp-client-fs.js
+```
+
+Two things to know about this failure:
+
+- The **whole** conflicting extension is rejected, including its tools that don't clash.
+- pi exits, so `session/new` fails and the agent won't start in your ACP client at all.
+  The error is only visible in the client's agent logs.
+
+Note that overriding a _built-in_ tool is perfectly legal in pi; the conflict only arises
+because `pi-acp` already claims those four names.
+
+Workaround: set `PI_ACP_DISABLE_CLIENT_FS=1` in the agent's `env` block to turn off `pi-acp`'s
+overrides and hand `read`/`write`/`edit`/`bash` back. Client filesystem and terminal delegation
+are lost (edits appear only as diffs in the chat panel, and `bash` runs inside the pi subprocess
+again), but your extension loads.
 
 ## Limitations
 
 - MCP servers are accepted in ACP params and stored in session state, but not wired through to pi in this adapter. If you use [pi MCP adapter](https://github.com/nicobailon/pi-mcp-adapter) it will be available in the ACP client.
 - Assistant streaming is currently sent as `agent_message_chunk` (no separate thought stream).
 - Queue is implemented client-side and should work like pi's `one-at-a-time`
+- pi extensions that override `read`, `write`, `edit` or `bash` conflict with `pi-acp`'s own extension and prevent pi from starting (see [Compatibility with other pi extensions](#compatibility-with-other-pi-extensions))
 - ~~ACP clients don't yet suport session history, but ACP sessions from `pi-acp` can be `/resume`d in pi directly~~
 
 ## License

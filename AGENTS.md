@@ -56,6 +56,12 @@ Every path must stay tolerant of failure: a client error falls back to local dis
 pi's local shell (`createLocalBashOperations`, for bash), so the adapter still works with
 clients that advertise a capability but reject specific paths or commands.
 
+Overriding a built-in tool name has a cost: pi refuses to load two extensions that register
+the same tool, rejecting the whole conflicting extension and exiting (so `session/new` fails).
+`pi --extension` is otherwise additive — the user's own extensions still auto-load. Keep the
+set of overridden names as small as possible, and prefer `PI_ACP_DISABLE_CLIENT_FS=1` as the
+documented escape hatch.
+
 When the client owns the terminal, the session must not also emit the `_meta` pseudo-terminal
 (`bashTerminalInfoMeta` and friends in `src/acp/translate/bash.ts`) or echo pi's captured
 output — the client already renders both, and doing so duplicates the output.
