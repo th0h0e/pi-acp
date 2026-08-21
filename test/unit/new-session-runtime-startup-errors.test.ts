@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PiAcpAgent } from '../../src/acp/agent.js'
 import { SessionStore } from '../../src/acp/session-store.js'
-import { FakeAgentSideConnection, asAgentConn } from '../helpers/fakes.js'
+import { FakeAgentSideConnection, asAgentConn, fakeThinkingLevelCache } from '../helpers/fakes.js'
 
 class FakeSessions {
   closeCalls: string[] = []
@@ -44,6 +44,7 @@ test('PiAcpAgent: newSession returns AUTH_REQUIRED when pi reports an auth error
     sessionId: 's-auth',
     cwd: process.cwd(),
     proc: {
+      ...fakeThinkingLevelCache(),
       async getAvailableModels() {
         throw new Error('Authentication required: missing key')
       },
@@ -77,6 +78,7 @@ test('PiAcpAgent: newSession returns Internal error on non-auth model probe fail
     sessionId: 's-internal',
     cwd: process.cwd(),
     proc: {
+      ...fakeThinkingLevelCache(),
       async getAvailableModels() {
         throw new Error('socket hang up')
       },

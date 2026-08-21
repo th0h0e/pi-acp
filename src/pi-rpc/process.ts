@@ -78,6 +78,12 @@ type PiExtensionUiResponse =
 
 export type PiRpcEvent = Record<string, unknown>
 
+export type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
+
+export function isThinkingLevel(x: string): x is ThinkingLevel {
+  return x === 'off' || x === 'minimal' || x === 'low' || x === 'medium' || x === 'high' || x === 'xhigh'
+}
+
 type SpawnParams = {
   cwd: string
   /** Optional override for `pi` executable name/path */
@@ -96,6 +102,12 @@ export class PiRpcProcess {
   private readonly pending = new Map<string, { resolve: (v: PiRpcResponse) => void; reject: (e: unknown) => void }>()
   private eventHandlers: Array<(ev: PiRpcEvent) => void> = []
   private readonly preludeLines: string[] = []
+  /**
+   * pi has no readback for the thinking level: `set_thinking_level` takes effect but
+   * `get_state.thinkingLevel` keeps reporting the startup value, so re-reading it after a
+   * write yields stale data. Track the applied value here instead, next to the write.
+   */
+  private thinkingLevel: ThinkingLevel | null = null
 
   private constructor(child: ChildProcessWithoutNullStreams) {
     this.child = child
@@ -275,9 +287,22 @@ export class PiRpcProcess {
     return res.data
   }
 
-  async setThinkingLevel(level: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'): Promise<void> {
+  async setThinkingLevel(level: ThinkingLevel): Promise<void> {
     const res = await this.request({ type: 'set_thinking_level', level })
     if (!res.success) throw new Error(`pi set_thinking_level failed: ${res.error ?? JSON.stringify(res.data)}`)
+    this.thinkingLevel = level
+  }
+
+  /**
+   * Current thinking level, or null before one is known. Seed with `seedThinkingLevel`
+   * from `get_state` at session start, which is the only point pi reports it accurately.
+   */
+  getThinkingLevel(): ThinkingLevel | null {
+    return this.thinkingLevel
+  }
+
+  seedThinkingLevel(level: ThinkingLevel): void {
+    if (this.thinkingLevel === null) this.thinkingLevel = level
   }
 
   async setFollowUpMode(mode: 'all' | 'one-at-a-time'): Promise<void> {

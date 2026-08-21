@@ -1,7 +1,24 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { PiAcpAgent } from '../../src/acp/agent.js'
-import { FakeAgentSideConnection, asAgentConn } from '../helpers/fakes.js'
+import { FakeAgentSideConnection, asAgentConn, fakeThinkingLevelCache } from '../helpers/fakes.js'
+import type { ThinkingLevel } from '../../src/pi-rpc/process.js'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+/**
+ * Point pi settings at an empty dir: otherwise the developer's own `enabledModels`
+ * scopes the advertised list and these fixtures disappear.
+ */
+function withEmptyAgentDir(): () => void {
+  const prev = process.env.PI_CODING_AGENT_DIR
+  process.env.PI_CODING_AGENT_DIR = mkdtempSync(join(tmpdir(), 'pi-acp-settings-'))
+  return () => {
+    if (prev == null) delete process.env.PI_CODING_AGENT_DIR
+    else process.env.PI_CODING_AGENT_DIR = prev
+  }
+}
 
 class FakeSessions {
   constructor(private readonly session: any) {}
@@ -26,6 +43,7 @@ class FakeSessions {
 test('PiAcpAgent: newSession returns configOptions for model and thinking selectors', async () => {
   const realSetTimeout = globalThis.setTimeout
   ;(globalThis as any).setTimeout = () => 0 as any
+  const restoreAgentDir = withEmptyAgentDir()
 
   try {
     const conn = new FakeAgentSideConnection()
@@ -33,6 +51,7 @@ test('PiAcpAgent: newSession returns configOptions for model and thinking select
       sessionId: 's1',
       cwd: process.cwd(),
       proc: {
+        ...fakeThinkingLevelCache(),
         async getAvailableModels() {
           return {
             models: [
@@ -44,7 +63,8 @@ test('PiAcpAgent: newSession returns configOptions for model and thinking select
         async getState() {
           return {
             thinkingLevel: 'high',
-            model: { provider: 'test', id: 'beta' }
+            // xhigh is opt-in: without a non-null map entry it is not advertised.
+            model: { provider: 'test', id: 'beta', thinkingLevelMap: { xhigh: 'xhigh' } }
           }
         }
       },
@@ -91,10 +111,12 @@ test('PiAcpAgent: newSession returns configOptions for model and thinking select
     ])
   } finally {
     ;(globalThis as any).setTimeout = realSetTimeout
+    restoreAgentDir()
   }
 })
 
-test('PiAcpAgent: setSessionConfigOption maps model changes to pi and emits config_option_update', async () => {
+test('PiAcpAgent: setSessionConfigOption maps model changes to pi and emits config_option_update', async t => {
+  t.after(withEmptyAgentDir())
   const conn = new FakeAgentSideConnection()
   const state = {
     thinkingLevel: 'medium',
@@ -106,6 +128,7 @@ test('PiAcpAgent: setSessionConfigOption maps model changes to pi and emits conf
     sessionId: 's1',
     cwd: process.cwd(),
     proc: {
+      ...fakeThinkingLevelCache(),
       async getAvailableModels() {
         return {
           models: [
@@ -146,18 +169,20 @@ test('PiAcpAgent: setSessionConfigOption maps model changes to pi and emits conf
   ])
 })
 
-test('PiAcpAgent: setSessionConfigOption maps thought level changes to pi and emits sync updates', async () => {
+test('PiAcpAgent: setSessionConfigOption maps thought level changes to pi and emits sync updates', async t => {
+  t.after(withEmptyAgentDir())
   const conn = new FakeAgentSideConnection()
   const state = {
     thinkingLevel: 'medium',
-    model: { provider: 'test', id: 'alpha' }
+    model: { provider: 'test', id: 'alpha', thinkingLevelMap: { xhigh: 'xhigh' } }
   }
-  const thinkingLevels: string[] = []
+  const thinkingLevels: ThinkingLevel[] = []
 
   const session = {
     sessionId: 's1',
     cwd: process.cwd(),
     proc: {
+      ...fakeThinkingLevelCache(thinkingLevels),
       async getAvailableModels() {
         return {
           models: [{ provider: 'test', id: 'alpha', name: 'Alpha' }]
@@ -165,10 +190,6 @@ test('PiAcpAgent: setSessionConfigOption maps thought level changes to pi and em
       },
       async getState() {
         return state
-      },
-      async setThinkingLevel(level: string) {
-        thinkingLevels.push(level)
-        state.thinkingLevel = level
       }
     }
   }

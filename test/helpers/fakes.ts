@@ -1,5 +1,5 @@
 import type { AgentSideConnection } from '@agentclientprotocol/sdk'
-import type { PiRpcEvent } from '../../src/pi-rpc/process.js'
+import type { PiRpcEvent, ThinkingLevel } from '../../src/pi-rpc/process.js'
 
 type SessionUpdateMsg = Parameters<AgentSideConnection['sessionUpdate']>[0]
 
@@ -89,7 +89,10 @@ export class FakePiRpcProcess {
   // spies
   readonly prompts: Array<{ message: string; attachments: unknown[] }> = []
   readonly extensionUiResponses: unknown[] = []
+  readonly thinkingLevels: ThinkingLevel[] = []
   abortCount = 0
+
+  private thinkingLevel: ThinkingLevel | null = null
 
   onEvent(handler: (ev: PiRpcEvent) => void): () => void {
     this.handlers.push(handler)
@@ -118,12 +121,46 @@ export class FakePiRpcProcess {
     return {}
   }
 
+  async setThinkingLevel(level: ThinkingLevel): Promise<void> {
+    this.thinkingLevels.push(level)
+    this.thinkingLevel = level
+  }
+
+  getThinkingLevel(): ThinkingLevel | null {
+    return this.thinkingLevel
+  }
+
+  seedThinkingLevel(level: ThinkingLevel): void {
+    if (this.thinkingLevel === null) this.thinkingLevel = level
+  }
+
   async getAvailableModels(): Promise<any> {
     return { models: [{ provider: 'test', id: 'model', name: 'model' }] }
   }
 
   async getMessages(): Promise<any> {
     return { messages: [] }
+  }
+}
+
+/**
+ * Thinking-level cache for ad-hoc `proc` doubles, mirroring PiRpcProcess. Real pi never
+ * reports the level back through `get_state`, so doubles must not either — otherwise they
+ * are more consistent than production and hide read-after-write bugs.
+ */
+export function fakeThinkingLevelCache(spy?: ThinkingLevel[]) {
+  let level: ThinkingLevel | null = null
+  return {
+    async setThinkingLevel(next: ThinkingLevel): Promise<void> {
+      spy?.push(next)
+      level = next
+    },
+    getThinkingLevel(): ThinkingLevel | null {
+      return level
+    },
+    seedThinkingLevel(next: ThinkingLevel): void {
+      if (level === null) level = next
+    }
   }
 }
 

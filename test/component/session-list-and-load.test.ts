@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { PiAcpAgent } from '../../src/acp/agent.js'
-import { FakeAgentSideConnection, asAgentConn } from '../helpers/fakes.js'
+import { FakeAgentSideConnection, asAgentConn, fakeThinkingLevelCache } from '../helpers/fakes.js'
 
 // We mock PiRpcProcess.spawn so loadSession doesn't actually spawn `pi`.
 import { PiRpcProcess } from '../../src/pi-rpc/process.js'
@@ -89,7 +89,8 @@ test('PiAcpAgent: listSessions lists pi sessions and loadSession replays history
           ]
         }),
         getAvailableModels: async () => ({ models: [] }),
-        getState: async () => ({ thinkingLevel: 'medium' })
+        getState: async () => ({ thinkingLevel: 'medium' }),
+        ...fakeThinkingLevelCache()
       } as any
     }
 

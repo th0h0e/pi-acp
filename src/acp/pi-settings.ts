@@ -63,6 +63,21 @@ export function getEnableSkillCommands(cwd: string): boolean {
 }
 
 /**
+ * Models pi's `/scoped-models` selection (`enabledModels`), used to narrow the advertised
+ * model list. Entries are `"<provider>/<modelId>"`, matching how models are advertised.
+ *
+ * Returns an empty array when unset, which means "no scoping" — not "no models".
+ */
+export function getEnabledModels(cwd: string): string[] {
+  const merged = getMergedSettings(cwd)
+
+  const enabled = merged.enabledModels
+  if (!Array.isArray(enabled)) return []
+
+  return enabled.filter((x): x is string => typeof x === 'string' && x.length > 0)
+}
+
+/**
  * Mirror pi's quietStartup setting: if true, pi suppresses the verbose startup prelude.
  * We use it to decide whether to synthesize + emit our own "startup info" message.
  */

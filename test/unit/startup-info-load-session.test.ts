@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { PiAcpAgent } from '../../src/acp/agent.js'
-import { FakeAgentSideConnection, asAgentConn } from '../helpers/fakes.js'
+import { FakeAgentSideConnection, asAgentConn, fakeThinkingLevelCache } from '../helpers/fakes.js'
 import { PiRpcProcess } from '../../src/pi-rpc/process.js'
 
 class FakeStore {
@@ -28,7 +28,8 @@ test('PiAcpAgent: does not emit startup info on loadSession', async () => {
       onEvent: () => () => {},
       getMessages: async () => ({ messages: [] }),
       getAvailableModels: async () => ({ models: [] }),
-      getState: async () => ({ thinkingLevel: 'medium' })
+      getState: async () => ({ thinkingLevel: 'medium' }),
+      ...fakeThinkingLevelCache()
     } as any
   }
 

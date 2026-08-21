@@ -36,7 +36,7 @@ import { NO_CLIENT_DELEGATION_CAPABILITIES, type ClientDelegationCapabilities } 
 import { FsBridgeServer } from './fs-bridge.js'
 import { SessionManager, type PiAcpSession } from './session.js'
 import { SessionStore } from './session-store.js'
-import { PiRpcProcess } from '../pi-rpc/process.js'
+import { PiRpcProcess, isThinkingLevel, type ThinkingLevel } from '../pi-rpc/process.js'
 import { listPiSessions, findPiSession } from './pi-sessions.js'
 import { normalizePiAssistantText, normalizePiMessageText } from './translate/pi-messages.js'
 import { toolResultToText, toToolKind } from './translate/pi-tools.js'
@@ -52,7 +52,7 @@ import {
 } from './translate/bash.js'
 import { promptToPiMessage } from './translate/prompt.js'
 import { loadSlashCommands, parseCommandArgs, toAvailableCommands } from './slash-commands.js'
-import { getAgentDir, getEnableSkillCommands, getQuietStartup } from './pi-settings.js'
+import { getAgentDir, getEnableSkillCommands, getEnabledModels, getQuietStartup } from './pi-settings.js'
 import { toAvailableCommandsFromPiGetCommands } from './pi-commands.js'
 import { maybeAuthRequiredError } from './auth-required.js'
 import { isAbsolute } from 'node:path'
@@ -61,7 +61,6 @@ import type { AvailableCommand } from '@agentclientprotocol/sdk'
 import { join, dirname, basename } from 'node:path'
 import { spawnSync } from 'node:child_process'
 
-type ThinkingLevel = 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
 type AdvertisedModel = {
   modelId: string
   name: string
@@ -400,7 +399,7 @@ export class PiAcpAgent implements ACPAgent {
       )
     }
 
-    const { configOptions, models, modes } = await getSessionConfiguration(session.proc, {
+    const { configOptions, models, modes } = await getSessionConfiguration(session.proc, params.cwd, {
       state,
       availableModels
     })
@@ -1128,7 +1127,7 @@ export class PiAcpAgent implements ACPAgent {
       }
     }
 
-    const { configOptions, models, modes } = await getSessionConfiguration(proc)
+    const { configOptions, models, modes } = await getSessionConfiguration(proc, params.cwd)
 
     const response = {
       configOptions,
@@ -1205,7 +1204,7 @@ export class PiAcpAgent implements ACPAgent {
   async unstable_setSessionModel(params: { sessionId: string; modelId: string }): Promise<void> {
     const session = await this.restoreSession(params.sessionId)
     await setSessionModel(session.proc, params.modelId)
-    await emitConfigOptionsUpdate(this.conn, session.sessionId, session.proc)
+    await emitConfigOptionsUpdate(this.conn, session.sessionId, session.proc, session.cwd)
   }
 
   async setSessionMode(params: SetSessionModeRequest): Promise<SetSessionModeResponse> {
@@ -1216,20 +1215,30 @@ export class PiAcpAgent implements ACPAgent {
       throw RequestError.invalidParams(`Unknown modeId: ${mode}`)
     }
 
-    await session.proc.setThinkingLevel(mode)
+    await this.applyThinkingLevel(session, mode)
 
-    // Let the client know the current mode changed (keeps the dropdown in sync).
+    return {}
+  }
+
+  /**
+   * Single write path for the thinking level, so `current_mode_update` and
+   * `config_option_update` always describe the same value.
+   */
+  private async applyThinkingLevel(
+    session: { sessionId: string; proc: PiRpcProcess; cwd: string },
+    level: ThinkingLevel
+  ): Promise<SessionConfigOption[]> {
+    await session.proc.setThinkingLevel(level)
+
     void this.conn.sessionUpdate({
       sessionId: session.sessionId,
       update: {
         sessionUpdate: 'current_mode_update',
-        currentModeId: mode
+        currentModeId: level
       }
     })
 
-    await emitConfigOptionsUpdate(this.conn, session.sessionId, session.proc)
-
-    return {}
+    return emitConfigOptionsUpdate(this.conn, session.sessionId, session.proc, session.cwd)
   }
 
   async setSessionConfigOption(params: SetSessionConfigOptionRequest): Promise<SetSessionConfigOptionResponse> {
@@ -1240,76 +1249,89 @@ export class PiAcpAgent implements ACPAgent {
       throw RequestError.invalidParams(`Expected string value for config option: ${configId}`)
     }
 
-    if (configId === MODEL_CONFIG_ID) {
-      await setSessionModel(session.proc, params.value)
-    } else if (configId === THOUGHT_LEVEL_CONFIG_ID) {
+    if (configId === THOUGHT_LEVEL_CONFIG_ID) {
       if (!isThinkingLevel(params.value)) {
         throw RequestError.invalidParams(`Unknown thinking level: ${params.value}`)
       }
 
-      await session.proc.setThinkingLevel(params.value)
+      return { configOptions: await this.applyThinkingLevel(session, params.value) }
+    }
 
-      void this.conn.sessionUpdate({
-        sessionId: session.sessionId,
-        update: {
-          sessionUpdate: 'current_mode_update',
-          currentModeId: params.value
-        }
-      })
-    } else {
+    if (configId !== MODEL_CONFIG_ID) {
       throw RequestError.invalidParams(`Unknown config option: ${configId}`)
     }
 
-    const configOptions = await emitConfigOptionsUpdate(this.conn, session.sessionId, session.proc)
+    await setSessionModel(session.proc, params.value)
+
+    const configOptions = await emitConfigOptionsUpdate(this.conn, session.sessionId, session.proc, session.cwd)
     return { configOptions }
   }
 }
 
-function isThinkingLevel(x: string): x is ThinkingLevel {
-  return x === 'off' || x === 'minimal' || x === 'low' || x === 'medium' || x === 'high' || x === 'xhigh'
+const THINKING_LEVELS: ThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh']
+
+type PiThinkingLevelMap = Partial<Record<string, string | null>>
+
+/**
+ * Thinking levels a model actually accepts, per pi-ai's `thinkingLevelMap` semantics:
+ * levels up to `high` fall back to provider defaults when the map omits them, `xhigh` is
+ * opt-in and needs a non-null entry, and an explicit `null` marks a level unsupported.
+ *
+ * pi's `max` level is deliberately ignored: the adapter's ThinkingLevel does not model it.
+ */
+export function supportedThinkingLevels(
+  model: { reasoning?: boolean; thinkingLevelMap?: PiThinkingLevelMap } | null
+): ThinkingLevel[] {
+  if (model?.reasoning === false) return ['off']
+
+  const map = model?.thinkingLevelMap
+  return THINKING_LEVELS.filter(level => {
+    if (!map || !(level in map)) return level !== 'xhigh'
+    return map[level] != null
+  })
+}
+
+/** Nearest supported level at or below `level`, else the lowest supported one. */
+export function clampThinkingLevel(level: ThinkingLevel, supported: ThinkingLevel[]): ThinkingLevel {
+  if (supported.includes(level)) return level
+  if (!supported.length) return level
+
+  const wanted = THINKING_LEVELS.indexOf(level)
+  const below = supported.filter(s => THINKING_LEVELS.indexOf(s) <= wanted)
+  return below.length ? below[below.length - 1] : supported[0]
 }
 
 async function getThinkingState(
   proc: PiRpcProcess,
   pre?: { state?: any | null }
-): Promise<{
-  availableModes: Array<{
-    id: string
-    name: string
-    description?: string | null
-  }>
-  currentModeId: string
-}> {
-  // Ask pi for current thinking level.
+): Promise<{ currentModeId: ThinkingLevel }> {
   let current: ThinkingLevel = 'medium'
 
-  const state =
-    pre?.state ??
-    (await (async () => {
-      try {
-        return (await proc.getState()) as any
-      } catch {
-        return null
-      }
-    })())
+  const cached = proc.getThinkingLevel()
+  if (cached) {
+    current = cached
+  } else {
+    const state =
+      pre?.state ??
+      (await (async () => {
+        try {
+          return (await proc.getState()) as any
+        } catch {
+          return null
+        }
+      })())
 
-  const tl = typeof state?.thinkingLevel === 'string' ? state.thinkingLevel : null
-  if (tl && isThinkingLevel(tl)) current = tl
-
-  const available: ThinkingLevel[] = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh']
-
-  return {
-    currentModeId: current,
-    availableModes: available.map(id => ({
-      id,
-      name: `Thinking: ${id}`,
-      description: null
-    }))
+    const tl = typeof state?.thinkingLevel === 'string' ? state.thinkingLevel : null
+    if (tl && isThinkingLevel(tl)) current = tl
+    proc.seedThinkingLevel(current)
   }
+
+  return { currentModeId: current }
 }
 
 async function getSessionConfiguration(
   proc: PiRpcProcess,
+  cwd: string,
   pre?: { state?: any | null; availableModels?: any | null }
 ): Promise<{
   configOptions: SessionConfigOption[]
@@ -1326,7 +1348,28 @@ async function getSessionConfiguration(
     currentModeId: string
   }
 }> {
-  const [models, modes] = await Promise.all([getModelState(proc, pre), getThinkingState(proc, { state: pre?.state })])
+  const [models, thinking] = await Promise.all([
+    getModelState(proc, cwd, pre),
+    getThinkingState(proc, { state: pre?.state })
+  ])
+
+  const supported = supportedThinkingLevels(models?.currentModel ?? null)
+
+  // Switching models can strip the selected level; realign pi so it agrees with what we
+  // advertise, rather than reporting a currentValue that is not among the options.
+  let currentModeId = clampThinkingLevel(thinking.currentModeId, supported)
+  if (currentModeId !== thinking.currentModeId) {
+    try {
+      await proc.setThinkingLevel(currentModeId)
+    } catch {
+      currentModeId = thinking.currentModeId
+    }
+  }
+
+  const modes = {
+    currentModeId,
+    availableModes: supported.map(id => ({ id, name: `Thinking: ${id}`, description: null }))
+  }
 
   return {
     configOptions: buildConfigOptions({ models, modes }),
@@ -1384,12 +1427,36 @@ function buildConfigOptions(state: {
   return configOptions
 }
 
+/**
+ * Narrow the advertised models to pi's `/scoped-models` selection.
+ *
+ * The current model is always kept even when unscoped: a `currentValue` that is not among
+ * `options` is invalid, and pi's `defaultModel` need not appear in `enabledModels`.
+ * Scope entries that match no known model are ignored rather than advertised.
+ */
+export function applyModelScope(
+  models: AdvertisedModel[],
+  currentModelId: string | null,
+  enabledModels: string[]
+): AdvertisedModel[] {
+  if (!enabledModels.length) return models
+
+  const scope = new Set(enabledModels)
+  const scoped = models.filter(m => scope.has(m.modelId) || m.modelId === currentModelId)
+
+  // Never advertise an empty dropdown: a stale scope that resolves to nothing falls back.
+  return scoped.length ? scoped : models
+}
+
 async function getModelState(
   proc: PiRpcProcess,
+  cwd: string,
   pre?: { state?: any | null; availableModels?: any | null }
 ): Promise<{
   availableModels: AdvertisedModel[]
   currentModelId: string
+  /** Raw pi entry for the active model, carrying `reasoning` / `thinkingLevelMap`. */
+  currentModel: { reasoning?: boolean; thinkingLevelMap?: PiThinkingLevelMap } | null
 } | null> {
   // Ask pi for available models.
   let availableModels: AdvertisedModel[] = []
@@ -1442,21 +1509,42 @@ async function getModelState(
 
   if (!availableModels.length && !currentModelId) return null
 
+  availableModels = applyModelScope(availableModels, currentModelId, getEnabledModels(cwd))
+
   // Fallback if current model is unknown: use first in list.
   if (!currentModelId) currentModelId = availableModels[0]?.modelId ?? 'default'
 
+  const currentModel =
+    model && typeof model === 'object'
+      ? (model as { reasoning?: boolean; thinkingLevelMap?: PiThinkingLevelMap })
+      : (models.find(m => `${m?.provider}/${m?.id}` === currentModelId) ?? null)
+
   return {
     availableModels,
-    currentModelId: currentModelId ?? availableModels[0]?.modelId ?? 'default'
+    currentModelId: currentModelId ?? availableModels[0]?.modelId ?? 'default',
+    currentModel
   }
 }
 
 async function emitConfigOptionsUpdate(
   conn: AgentSideConnection,
   sessionId: string,
-  proc: PiRpcProcess
+  proc: PiRpcProcess,
+  cwd: string
 ): Promise<SessionConfigOption[]> {
-  const { configOptions } = await getSessionConfiguration(proc)
+  const before = proc.getThinkingLevel()
+  const { configOptions, modes } = await getSessionConfiguration(proc, cwd)
+
+  // A model switch may have clamped the thinking level; keep the modes channel in step.
+  if (before !== null && modes.currentModeId !== before) {
+    void conn.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: 'current_mode_update',
+        currentModeId: modes.currentModeId
+      }
+    })
+  }
 
   await conn.sessionUpdate({
     sessionId,

@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PiAcpAgent } from '../../src/acp/agent.js'
 import { PiRpcProcess } from '../../src/pi-rpc/process.js'
-import { FakeAgentSideConnection, asAgentConn } from '../helpers/fakes.js'
+import { FakeAgentSideConnection, asAgentConn, fakeThinkingLevelCache } from '../helpers/fakes.js'
 
 class FakeSessions {
   restoredSession: any = null
@@ -144,6 +144,7 @@ test('PiAcpAgent: setSessionConfigOption auto-restores via pi session discovery 
         ]
       }),
       getState: async () => state,
+      ...fakeThinkingLevelCache(),
       async setModel(provider: string, modelId: string) {
         setModelCalls.push({ provider, modelId })
         state.model = { provider, id: modelId }

@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { PiAcpAgent } from '../../src/acp/agent.js'
-import { FakeAgentSideConnection, asAgentConn } from '../helpers/fakes.js'
+import { FakeAgentSideConnection, asAgentConn, fakeThinkingLevelCache } from '../helpers/fakes.js'
 
 class FakeSessions {
   closeCalls: string[] = []
@@ -24,6 +24,7 @@ test('PiAcpAgent: newSession throws AUTH_REQUIRED when pi reports zero available
     sessionId: 's1',
     cwd: process.cwd(),
     proc: {
+      ...fakeThinkingLevelCache(),
       async getAvailableModels() {
         return { models: [] }
       },

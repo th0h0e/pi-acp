@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { PiAcpAgent } from '../../src/acp/agent.js'
-import { FakeAgentSideConnection, asAgentConn } from '../helpers/fakes.js'
+import { FakeAgentSideConnection, asAgentConn, fakeThinkingLevelCache } from '../helpers/fakes.js'
 
 class FakeSessions {
   constructor(private readonly session: any) {}
@@ -41,6 +41,7 @@ test('PiAcpAgent: startup info includes project-level packages from .pi/settings
       sessionId: 's1',
       cwd: projectDir,
       proc: {
+        ...fakeThinkingLevelCache(),
         async getAvailableModels() {
           return { models: [{ provider: 'test', id: 'model', name: 'model' }] }
         },
